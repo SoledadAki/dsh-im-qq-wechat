@@ -278,6 +278,9 @@ export class SidecarChannelAdapter implements ChannelAdapter {
         ? { ok: true }
         : { ok: false, error: 'QQ 扫码尚未确认' }
     }
+    // WeChat iLink QR binding is completed in the WeChat client and has no
+    // separate verification-code step.
+    if (this.kind === 'wechat') return { ok: true }
     if (this.bindingTaskId === undefined || this.status.state !== 'awaiting-code') {
       return { ok: false, error: '微信绑定任务已失效' }
     }
@@ -321,7 +324,7 @@ export class SidecarChannelAdapter implements ChannelAdapter {
     if (frame.type === 'binding.qr_displayed' && payload.task_id === this.bindingTaskId) {
       const qrDataUrl = String(payload.qr_url || '')
       if (qrDataUrl === '') return
-      this.status = { ...this.status, state: 'awaiting-code', qrDataUrl }
+      this.status = { ...this.status, state: 'awaiting-code', qrDataUrl, error: undefined }
       this.qrWaiter?.resolve({ qrDataUrl })
       this.qrWaiter = undefined
       return
@@ -331,6 +334,7 @@ export class SidecarChannelAdapter implements ChannelAdapter {
       return
     }
     if (frame.type === 'binding.qr_expired') {
+      if (this.kind === 'wechat') return
       this.status = { ...this.status, error: '二维码已过期，正在刷新' }
       return
     }

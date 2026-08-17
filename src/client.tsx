@@ -75,8 +75,10 @@ window.__ModuleLoader__!.load({
     function ChannelCard({ channel, row, controller, onRefresh }: { key?: string; channel: string; row: any; controller: Controller; onRefresh: () => Promise<void> }) {
       const cs = row.status ?? { state: 'idle', connected: false }
       const [showManual, setShowManual] = useState(false)
-      const [code, setCode] = useState('')
+      // WeChat QR binding is confirmed in the WeChat client; no captcha/code
+      // input is needed here.
       const [busy, setBusy] = useState(false)
+      const [starting, setStarting] = useState(false)
       const act = async (operation: () => Promise<RpcResult | void>) => {
         setBusy(true)
         try {
@@ -85,7 +87,10 @@ window.__ModuleLoader__!.load({
           await onRefresh()
         } finally { setBusy(false) }
       }
-      const begin = () => act(() => controller.begin(channel))
+      const begin = () => {
+        setStarting(true)
+        return act(() => controller.begin(channel)).finally(() => setStarting(false))
+      }
       const manual = manualChannels.has(channel)
       const hasQr = qrChannels.has(channel)
       return <section style={{ border: '1px solid #dde1e8', borderRadius: 12, padding: 16, minWidth: 280, background: '#fff' }}>
@@ -94,13 +99,14 @@ window.__ModuleLoader__!.load({
           <span style={{ color: cs.connected ? '#1e7e34' : '#b42318', fontSize: 13, whiteSpace: 'nowrap' }}>{cs.connected ? '✓ 已连接' : '× 未连接'}</span>
         </div>
         {cs.error && <p style={{ color: '#b42318', fontSize: 12, marginBottom: 4 }}>{cs.error}</p>}
+        {starting && <p style={{ color: '#687386', fontSize: 12, margin: '8px 0 0' }}>正在生成二维码…</p>}
         {cs.state === 'idle' && hasQr && <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-          <button disabled={busy} style={{ background: '#2f6fed', color: '#fff' }} onClick={() => void begin()}>扫码接入机器人</button>
+          <button disabled={busy} style={{ background: '#2f6fed', color: '#fff' }} onClick={() => void begin()}>{starting ? '正在生成二维码…' : '扫码接入机器人'}</button>
           {(channel === 'feishu' || channel === 'wecom') && <><button disabled={busy} onClick={() => setShowManual((value: boolean) => !value)}>{showManual ? '收起手动接入' : '已有机器人？手动接入'}</button>{showManual && <CredentialForm channel={channel} controller={controller} onRefresh={onRefresh} />}</>}
         </div>}
         {cs.state === 'idle' && manual && <CredentialForm channel={channel} controller={controller} onRefresh={onRefresh} />}
         {cs.state === 'awaiting-code' && cs.code && <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: '#f6f8fb' }}><b>配对码：{cs.code}</b><p style={{ fontSize: 12, color: '#687386', marginBottom: 0 }}>请用你的账号私聊机器人发送此配对码。绑定后只有该账号能控制 Harness。</p></div>}
-        {cs.state === 'awaiting-code' && !manual && cs.qrDataUrl && <div style={{ marginTop: 12, display: 'grid', gap: 8 }}><QrView url={cs.qrDataUrl} channel={channel} />{channel === 'wechat' && <div style={{ display: 'flex', gap: 8 }}><input value={code} placeholder="微信验证码" onChange={(e: any) => setCode(e.target.value)} /><button disabled={busy} onClick={() => void act(() => controller.verify(channel, code))}>提交</button></div>}</div>}
+        {cs.state === 'awaiting-code' && !manual && cs.qrDataUrl && <div style={{ marginTop: 12, display: 'grid', gap: 8 }}><QrView url={cs.qrDataUrl} channel={channel} /></div>}
         {cs.state === 'bound' && <p style={{ fontSize: 13, color: '#475467' }}>已绑定用户：{cs.boundUserId ?? '平台授权范围'}</p>}
         {cs.state !== 'idle' && <div style={{ display: 'flex', gap: 8, marginTop: 10 }}><button disabled={busy} onClick={() => void act(() => controller.unbind(channel))}>解绑</button>{cs.connected ? <button disabled={busy} onClick={() => void act(() => controller.disconnect(channel))}>断开</button> : <button disabled={busy} onClick={() => void act(() => controller.connect(channel))}>重连</button>}</div>}
       </section>
@@ -118,7 +124,7 @@ window.__ModuleLoader__!.load({
       useEffect(() => { void refresh(); const timer = setInterval(() => void refresh(), 2000); return () => clearInterval(timer) }, [refresh])
       const channels = Object.entries(status?.channels ?? {})
       return <div style={{ padding: 16, maxWidth: 960 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}><div><h3 style={{ margin: 0 }}>接入即时通信</h3><p style={{ color: '#687386', fontSize: 13, margin: '7px 0 0' }}>统一管理 QQ、微信、企业微信、飞书和 Telegram。消息、项目、会话、审核与流式回复共用同一套 Harness 能力。</p></div><button disabled={loading} onClick={() => void refresh()}>刷新</button></div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}><div><h3 style={{ margin: 0 }}>接入即时通信</h3><p style={{ color: '#687386', fontSize: 13, margin: '7px 0 0' }}>统一管理 QQ、微信、企业微信、飞书和 Telegram。消息、项目、会话、审核与流式回复共用同一套 Harness 能力。</p></div><button disabled={loading} title="刷新状态" aria-label="刷新状态" style={{ width: 34, height: 34, padding: 0, border: '1px solid #d0d5dd', borderRadius: 8, background: '#fff', color: '#475467', fontSize: 20, lineHeight: 1, cursor: loading ? 'default' : 'pointer' }} onClick={() => void refresh()}>↻</button></div>
         {error && <p style={{ color: '#b42318', fontSize: 12 }}>{error}</p>}
         {loading && channels.length === 0 ? <p style={{ color: '#687386' }}>正在读取渠道状态…</p> : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(300px,1fr))', gap: 16, marginTop: 16 }}>{channels.map(([channel, row]) => <ChannelCard key={channel} channel={channel} row={row} controller={controller} onRefresh={refresh} />)}</div>}
       </div>

@@ -59,7 +59,9 @@ function pruneReplyContexts() {
 async function refreshQr(task) {
   task.refreshCount += 1;
   if (task.refreshCount > 3) throw new Error("二维码多次过期，请重新发起连接");
-  emit("binding.qr_expired", { task_id: task.taskId }, task.profileId);
+  // The first QR is new, not expired. Only notify the host when replacing a
+  // QR that was already shown to the user.
+  if (task.refreshCount > 1) emit("binding.qr_expired", { task_id: task.taskId }, task.profileId);
   const result = await createQr([], DEFAULT_BOT_TYPE);
   if (!result?.qrcode || !result?.qrcode_img_content) throw new Error("腾讯未返回完整二维码");
   task.qrcode = result.qrcode;
@@ -237,7 +239,7 @@ async function handleFrame(frame) {
       protocol_version: PROTOCOL_VERSION,
       sidecar_version: "0.1.0",
       official_protocol_source: "@tencent-weixin/openclaw-weixin@2.4.6",
-      capabilities: ["qr_connect", "credential_handoff", "weixin_long_poll", "c2c_text", "verify_code"],
+      capabilities: ["qr_connect", "credential_handoff", "weixin_long_poll", "c2c_text"],
     }, frame.profile_id || "", frame.id || "");
     return;
   }
@@ -352,4 +354,3 @@ lines.on("close", async () => {
 });
 process.on("uncaughtException", failClosed);
 process.on("unhandledRejection", failClosed);
-
