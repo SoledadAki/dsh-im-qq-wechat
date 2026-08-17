@@ -1,0 +1,13 @@
+# DeepSeek Harness web profile layer for this plugin.
+- insert:
+    - id: qq-weixin
+      name: dsh-im-qq-wechat
+      config:
+        channels: [qq, wechat, wecom, feishu, telegram]
+        stateDir: ''
+        sharedSession: false
+        preset: ''
+        cwd: ''
+        sourceKind: user
+        approvalPolicy: ask
+        replyTimeoutMs: 0

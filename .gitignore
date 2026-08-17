@@ -1,0 +1,15 @@
+# Dependencies and generated output
+node_modules/
+lib/
+*.tgz
+
+# Local Harness/plugin state and editor metadata
+.pnpm-store/
+.agents/
+.codex/
+.idea/
+.vscode/
+*.log
+.env
+.env.*
+!.env.example

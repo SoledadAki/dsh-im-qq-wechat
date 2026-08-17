@@ -1,0 +1,10 @@
+packages:
+  - .
+nodeLinker: hoisted
+autoInstallPeers: true
+onlyBuiltDependencies:
+  - esbuild
+  - protobufjs
+allowBuilds:
+  esbuild: true
+  protobufjs: true
