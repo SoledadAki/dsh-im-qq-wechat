@@ -4,6 +4,22 @@ import { createEditableMessageStream, splitMessageText } from '../src/editable-s
 import { TelegramApi, validTelegramToken } from '../src/telegram-api.js'
 import { InboundTracker } from '../src/correlation.js'
 
+test('new Host live streams correlate attempts and ignore stale or duplicate chunks', () => {
+  const tracker = new InboundTracker()
+  tracker.register({ extId: 'a', sessionId: 's', channel: 'qq', userId: 'u', msgId: 'm' })
+  tracker.onInboxClaimed('m', 1)
+  const start = { type: 'start', attemptId: 'attempt', revision: 1, turn: 1, step: 1 } as const
+  tracker.onAssistantStream('s', start as any)
+  const chunk = { type: 'chunk', attemptId: 'attempt', revision: 1, index: 0, time: 1, chunk: { type: 'text-delta', index: 0, text: '你好' } } as const
+  assert.equal(tracker.onAssistantStream('s', chunk as any)[0]?.streamText, '你好')
+  assert.deepEqual(tracker.onAssistantStream('s', chunk as any), [])
+  tracker.onAssistantStream('s', { ...start, attemptId: 'retry', revision: 2 } as any)
+  assert.deepEqual(tracker.onAssistantStream('s', { ...chunk, index: 1 } as any), [])
+  assert.equal(tracker.onAssistantStream('s', { ...chunk, attemptId: 'retry', revision: 2 } as any)[0]?.streamText, '你好')
+  tracker.dropSession('s')
+  assert.deepEqual(tracker.onAssistantStream('s', { ...chunk, index: 2 } as any), [])
+})
+
 test('message splitting rejects invalid limits and preserves surrogate pairs', () => {
   for (const limit of [0, -1, 1, 1.5, NaN, Infinity]) assert.throws(() => splitMessageText('hello', limit), RangeError)
   const text = 'abcd😀你好😀abc'

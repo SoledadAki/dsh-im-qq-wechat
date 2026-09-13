@@ -1,26 +1,14 @@
-/**
- * dsh-qq-weixin 插件入口（Host 半边）。
- *
- * 接线：QQ/微信真实通道适配器 → AgentManager（创建/恢复 Agent）→
- * InboundTracker（MessageId/turn 关联）→ 通道回发；审批/提问桥；
- * /qqbot JSON-RPC（状态/开始绑定/二维码/验证码/取消绑定/断开）；
- * credentials 引用式秘密；settings 持久化会话映射。
- *
- * 生命周期：ctx.on/ctx.timeout/ctx.effect 全部挂在插件 fiber 上，插件
- * 卸载（stop/undefine/进程退出）时按 LIFO 逆序自动清理；我们创建的 Agent
- * 由 agent-loop 以 ownerCtx=本插件 ctx 注册，卸载时一并 dispose。
- */
+/** Harness 0.1.5-rc.2 Host plugin: persistent IM agents and authenticated setup. */
 
-import { randomBytes } from 'node:crypto'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import { installImRpc } from './rpc.js'
 import { stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { APPROVAL_POLICIES } from '@deepseek-ai/dsh-user-approval'
-import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
 import type { ChannelAdapter, ChannelKind, ChannelReplyStream, ChannelStatus } from './channel.js'
@@ -42,12 +30,11 @@ import { SidecarChannelAdapter, type PersistedChannelBinding } from './sidecar-c
 import { TelegramChannelAdapter } from './telegram-channel.js'
 import { FeishuChannelAdapter } from './feishu-channel.js'
 import { WecomChannelAdapter } from './wecom-channel.js'
-import { installBindPage, type BindPage } from './bind-page.js'
 import { BRIDGE_HELP, formatTokenCount, parseBridgeCommand, safetyLabel } from './commands.js'
 
 export const name = 'qq-weixin'
 
-export const inject = ['agents', 'approval', 'permissionPresets', 'llm', 'userQuestions', 'settings', 'credentials', 'timer', 'tools']
+export const inject = ['agents', 'approval', 'permissionPresets', 'llm', 'userQuestions', 'settings', 'credentials', 'timer', 'connection', 'agentPresets', 'agentDefaultModel']
 
 export interface PluginConfig {
   readonly channels: string[]
@@ -75,7 +62,7 @@ export const Config = z.object({
 })
 
 /** settings 命名空间：channel/user → sessionId 的持久化映射。 */
-const SETTINGS_NS = settingsNamespace('qq-weixin')
+const SETTINGS_NS = 'qq-weixin'
 const SETTINGS_SCHEMA = z.object({
   bindings: z.dict(z.string()).default({}),
   channels: z.dict(z.string()).default({}),
@@ -119,11 +106,10 @@ interface HostCtx {
     set(ref: string, value: string): Promise<void>
     unset(ref: string): Promise<void>
   }
-  userQuestions: { registerProvider(provider: unknown): () => void }
   permissionPresets: {
     readonly names: readonly string[]
     readonly defaultPreset: string
-    current(events: readonly unknown[]): string
+    current(session: AgentLike['session']): string
     set(session: unknown, name: string): void
   }
   llm: {
@@ -135,11 +121,12 @@ interface HostCtx {
       reasoning?: { efforts: readonly { id: string; name: string }[]; defaultEffort?: string }
     }>
   }
-  tools: { register(tool: unknown): () => void }
   timeout(callback: () => void, ms: number): () => void
   on(name: string, listener: (...args: any[]) => unknown): () => void
   effect(fn: () => unknown, label?: string): unknown
-  get<T = unknown>(name: string): T | undefined
+  agentPresets: PresetsLike
+  agentDefaultModel: DefaultModelLike
+  connection: HostConnectionHandle
 }
 
 interface RpcOk {
@@ -148,14 +135,14 @@ interface RpcOk {
 }
 interface RpcErr {
   ok: false
-  error: { code: string; message: string; details?: Record<string, unknown> }
+  error: { code: string; message: string; details: Record<string, unknown> }
 }
 type RpcResult = RpcOk | RpcErr
 
 const ok = (value: unknown): RpcOk => ({ ok: true, value })
 const err = (code: string, message: string, details?: Record<string, unknown>): RpcErr => ({
   ok: false,
-  error: { code, message, ...(details !== undefined ? { details } : {}) },
+  error: { code, message, details: details ?? {} },
 })
 
 /* -------------------------------------------------------------------------- */
@@ -320,8 +307,8 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
   }
 
   /* ---- 可选服务 ---- */
-  const presets = ctx.get<PresetsLike>('agentPresets')
-  const defaultModel = ctx.get<DefaultModelLike>('agentDefaultModel')
+  const presets = ctx.agentPresets
+  const defaultModel = ctx.agentDefaultModel
 
   let resolvedPresetId: string | undefined
   async function resolvePresetId(): Promise<string | undefined> {
@@ -451,9 +438,9 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
   function currentModel(agent: AgentLike, sessionId: string): SessionModelSelection | undefined {
     const stored = storedModel(sessionId)
     if (stored !== undefined) return stored
-    for (const event of [...agent.session.events].reverse()) {
-      if (event.type === 'request/header' && event.data.config?.provider && event.data.config.model) {
-        return { provider: event.data.config.provider, model: event.data.config.model }
+    for (const event of [...agent.session.snapshotEvents()].reverse()) {
+      if (event.type === 'request/header' && event.data.header.config?.provider && event.data.header.config.model) {
+        return { provider: event.data.header.config.provider, model: event.data.header.config.model }
       }
     }
     if (agent.options?.provider && agent.options.model) return { provider: agent.options.provider, model: agent.options.model }
@@ -500,7 +487,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         logger.warn(`[qq-weixin] model metadata lookup failed: ${String(error)}`)
       }
     }
-    const safety = ctx.permissionPresets.current(input.agent.session.events)
+    const safety = ctx.permissionPresets.current(input.agent.session)
     const effort = settingsCache.efforts[input.sessionId] ?? detectedEffort ?? '模型默认'
     return [
       input.intro ?? '✨ 新会话已启动，从头开始。',
@@ -550,7 +537,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       case 'status': {
         const { agent, sessionId } = await ensure()
         const meta = sessionMeta(sessionId)
-        const safety = ctx.permissionPresets.current(agent.session.events)
+        const safety = ctx.permissionPresets.current(agent.session)
         const model = currentModel(agent, sessionId)
         const defaults = defaultModel?.currentSelection()
         const inheritedEffort = model !== undefined && defaults?.provider === model.provider && defaults.model === model.model
@@ -585,7 +572,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         const oldMeta = oldId === undefined ? undefined : sessionMeta(oldId)
         const cwd = oldMeta?.cwd ?? activeCwd(key)
         const name = oldMeta?.name ?? '新会话'
-        const safety = oldResult === undefined ? undefined : ctx.permissionPresets.current(oldResult.agent.session.events)
+        const safety = oldResult === undefined ? undefined : ctx.permissionPresets.current(oldResult.agent.session)
         const effort = oldId === undefined ? undefined : settingsCache.efforts[oldId]
         const model = oldResult === undefined ? undefined : currentModel(oldResult.agent, oldResult.sessionId)
         const result = await manager.createFresh(adapter.kind, userId, presetId, cwd, model)
@@ -677,7 +664,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         const meta = sessionMeta(sessionId)
         const cwd = meta?.cwd ?? activeCwd(key)
         const name = meta?.name ?? '新会话'
-        const safety = ctx.permissionPresets.current(agent.session.events)
+        const safety = ctx.permissionPresets.current(agent.session)
         let result: Awaited<ReturnType<typeof manager.forkWithModel>>
         try {
           result = await manager.forkWithModel(adapter.kind, userId, agent, selected, presetId, cwd)
@@ -793,7 +780,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       }
       case 'safe': {
         const { agent } = await ensure()
-        const current = ctx.permissionPresets.current(agent.session.events)
+        const current = ctx.permissionPresets.current(agent.session)
         if (command.preset === undefined) {
           await send(`安全等级：${safetyLabel(current)}\n可选：只读 / 写入 / 完全\n用法：/safe <等级>`)
           return true
@@ -885,12 +872,12 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
   ctx.on('agent/inbox/claimed', ({ agent, message, turn }: any) => {
     tracker.onInboxClaimed(message.id, turn)
   })
-  ctx.on('session/event', (session: any, event: SessionEventLike) => {
-    if (event.type === 'assistant/chunk' && event.data?.turn !== undefined && event.data.chunk?.type === 'text-delta' && event.data.chunk.text) {
-      for (const tracked of tracker.appendTextDelta(session.id, event.data.turn, event.data.chunk.text)) {
-        void tracked.stream?.update(tracked.streamText)
-      }
+  ctx.on('agent/assistant-stream', ({ agent, frame }: { agent: AgentLike; frame: import('@deepseek-ai/dsh-agent').AssistantStreamFrame }) => {
+    for (const tracked of tracker.onAssistantStream(agent.id, frame)) {
+      void Promise.resolve(tracked.stream?.update(tracked.streamText)).catch((error) => logger.warn('IM stream update failed', error))
     }
+  })
+  ctx.on('session/event', (session: any, event: SessionEventLike) => {
     if (event.type === 'assistant/message' && event.data?.turn !== undefined) {
       const text = (event.data.message?.content ?? [])
         .filter((block) => block.type === 'text')
@@ -908,7 +895,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       }
     }
     if (event.type === 'turn/end' && event.data?.turn !== undefined) {
-      for (const tracked of tracker.onTurnEnd(session.id, event.data.turn, session.events)) {
+      for (const tracked of tracker.onTurnEnd(session.id, event.data.turn, session.snapshotEvents())) {
         if (tracked.timeout !== undefined) {
           tracked.timeout()
           tracked.timeout = undefined
@@ -948,92 +935,14 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
     // A shared session needs the active claimed turn to avoid cross-channel delivery.
     return active ?? (config.sharedSession ? undefined : ownerBySession.get(sessionId))
   }
-  const stopApproval = installApprovalAnswerer(ctx, { adapters, ownerBySession, routeForRequest, logger })
-  /* ---- userQuestions 单 provider seam 的共存策略 ----
-   * web profile 的 api-gateway（dsh-host-apiproxy）启动时注册官方 provider，
-   * 且本插件行总是先于 api-gateway 激活：若我们也注册，api-gateway 会以
-   * DUPLICATE_PROVIDER 崩溃，整个插件树 fail-loud（webServer 存在 == 该 profile
-   * 必然挂载 apiproxy）。因此 web profile 下我们**不注册**，ask_user_question
-   * 由浏览器 UI 回答；web-free profile（headless/自定义）下我们注册，QQ/微信
-   * 通道接收问题。正确解是上游把 seam 改成多 provider / 按 agent scope 路由。
-   */
-  const webServer = ctx.get<{ host: '127.0.0.1' | '0.0.0.0'; port: number; register(route: unknown): () => void }>('webServer')
-  let stopQuestions: () => void = () => {}
-  if (webServer === undefined) {
-    try {
-      stopQuestions = installQuestionProvider(ctx, { adapters, ownerBySession, routeForRequest, logger })
-    } catch (error) {
-      const code = (error as { code?: string }).code
-      if (code === 'DUPLICATE_PROVIDER') {
-        logger.warn('[qq-weixin] userQuestions provider 已被占用，ask_user_question 将改由其他 provider 回答')
-      } else {
-        throw error
-      }
-    }
-  } else {
-    logger.warn('[qq-weixin] 检测到 web profile（webServer）：userQuestions 单 provider seam 由 api-gateway 持有，' +
-      'ask_user_question 将由浏览器 UI 回答；QQ/微信通道不接收问题（上游多 provider 修复前的权衡）')
-  }
-
-  /* ---- 扫码绑定独立页面 + qq_weixin_bind 工具（agent 无法收发图片 → 网页承载二维码） ---- */
-  let page: BindPage | undefined
-  if (webServer !== undefined) {
-    page = installBindPage({ adapters, webServer, logger })
-    ctx.tools.register(defineTool({
-      name: 'qq_weixin_bind',
-      description: '生成 QQ 或微信扫码绑定页面。返回一个 URL，人类用户用浏览器打开该页面即可看到二维码并扫码接入（当前 Agent 无法直接收发图片，二维码由独立网页承载）。channel 取 "qq" 或 "wechat"（"weixin" 为别名）。',
-      parameters: {
-        channel: {
-          type: 'string',
-          required: true,
-          enum: ['qq', 'wechat', 'weixin'],
-          description: '要绑定的渠道：qq（QQ 官方 Gateway）或 wechat（微信 iLink）。',
-        },
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            url: { type: 'string', description: '人类可打开的绑定页面 URL（内含二维码）。' },
-            channel: { type: 'string' },
-            token: { type: 'string', description: '页面会话凭证。' },
-            state: { type: 'string', description: '绑定状态：awaiting-code / bound / starting。' },
-            alreadyBound: { type: 'boolean' },
-            message: { type: 'string' },
-          },
-        },
-        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
-      },
-      async execute(args) {
-        const channel: ChannelKind = args.channel === 'weixin' ? 'wechat' : args.channel as ChannelKind
-        const adapter = adapters.get(channel)
-        if (adapter === undefined) throw new Error(`qq-weixin: 渠道 ${args.channel} 未配置（channels: ${config.channels.join(', ')}）`)
-        if (page === undefined) throw new Error('qq-weixin: 当前 profile 未提供 webServer，无法生成扫码绑定页面（需要 web profile）')
-        const status = adapter.getStatus()
-        if (status.state === 'bound') {
-          const token = randomBytes(16).toString('hex')
-          return {
-            url: page.urlFor(token),
-            channel,
-            token,
-            state: 'bound',
-            alreadyBound: true,
-            message: '该渠道已绑定；打开页面可查看连接状态。',
-          }
-        }
-        const { token, url } = page.start(channel)
-        return {
-          url,
-          channel,
-          token,
-          state: 'awaiting-code',
-          message: '请在浏览器打开该 URL 扫码绑定。',
-        }
-      },
-    }))
-    logger.info('[qq-weixin] bind page ready at /qqbot-bind (tool: qq_weixin_bind)')
-  }
+  const stopApproval = installApprovalAnswerer(ctx, {
+    adapters, ownerBySession, routeForRequest, logger,
+    ownsSession: (sessionId) => ownerBySession.has(sessionId),
+  })
+  const stopQuestions = installQuestionProvider(ctx, {
+    adapters, ownerBySession, routeForRequest, logger,
+    ownsSession: (sessionId) => ownerBySession.has(sessionId),
+  })
 
   /* ---- /qqbot JSON-RPC（信任篱笆 + 信封校验由 connection 提供） ---- */
   async function statusSnapshot(): Promise<Record<string, unknown>> {
@@ -1105,6 +1014,13 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
           return ok({ ok: true })
         }
 
+        case 'cancel': {
+          const adapter = adapters.get(payload?.channel as ChannelKind)
+          if (!adapter) return err('bad-request', '未知通道')
+          await adapter.cancelBinding()
+          return ok({ status: adapter.getStatus() })
+        }
+
         case 'unbind': {
           const channel = payload?.channel as ChannelKind
           const adapter = adapters.get(channel)
@@ -1140,19 +1056,13 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
     }
   }
 
-  const connection = ctx.get<{ rpc: { handle(channel: string, handler: (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult>, options: { authority: 'loopback' }): () => void } }>('connection')
-  const stopRpc = connection?.rpc.handle(
-    '/qqbot',
-    async (endpoint, payload) => rpcDispatch(endpoint, payload),
-    { authority: 'loopback' },
-  )
+  const stopRpc = installImRpc(ctx.connection, rpcDispatch)
 
   /* ---- 卸载清理：LIFO；async disposer 会被 await；ctx.on 的监听器自动移除 ---- */
   ctx.effect(() => async () => {
     stopApproval()
     stopQuestions()
-    stopRpc?.()
-    page?.dispose()
+    await stopRpc?.()
     for (const adapter of adapters.values()) {
       await adapter.dispose()
     }

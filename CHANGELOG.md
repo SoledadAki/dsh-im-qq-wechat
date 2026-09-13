@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0（待发布）
+
+- 用户安装流程改为预构建 tgz：不要求克隆、编译或执行插件安装脚本。
+- 发布包使用运行文件白名单，排除测试、源码映射、开发脚本和维护文档；产物统一进入 dist/。
+- 新增独立消费端安装验证：禁用安装脚本，验证 Host 入口、Web 模块注册及 QQ / 微信子进程握手。
+- 修复 QQ / 微信普通长回复截断，QQ 流式结尾按安全字符边界分段。
+- 非 IM 会话的工具审批继续交给 Harness；IM 会话缺少正确路由时仍拒绝自动放行。
+- 设置页捕获连接异常并显示内联错误，新增取消扫码绑定入口。
+- 新增按版本标签生成 GitHub Release 安装包的工作流。
+
+- 兼容目标迁移至 DeepSeek Harness 0.1.5-rc.2，更新 Cordis / Schemastery 与 Host 依赖。
+- 使用官方 Agent 类型、setup 第二参数、snapshotEvents、分叉继承元数据及新版权限查询。
+- 接入 agent/assistant-stream，按 attempt/revision 过滤旧流与重复片段。
+- 接入 user-questions/request waterfall，移除 Web 问题必须回浏览器处理的旧限制。
+- 移除独立扫码网页和绑定工具；设置页统一使用 Harness 认证的 Fetch 路由。
+- 新增真实 Host 安装、Web 启动、接口认证及 Agent 生命周期验证。
+
+兼容性限定 0.1.5-rc.2；真实平台登录未包含在自动化验收中。
+
 ## 0.4.1
 
 ### 修复

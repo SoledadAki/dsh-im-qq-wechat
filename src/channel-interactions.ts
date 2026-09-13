@@ -42,7 +42,7 @@ export class ChannelInteractions {
       if (signal?.aborted) abort()
     })
     void answer.catch(() => undefined)
-    const rendered = questions.map((q, i) => `${i + 1}. ${q.question}${q.options?.length ? ` [${q.options.map((o) => o.label).join(' / ')}]` : ''}`).join('\n')
+    const rendered = questions.map((q, i) => `${i + 1}. ${q.question}${q.detail ? `\n${q.detail}` : ''}${q.options?.length ? ` [${q.options.map((o) => o.label).join(' / ')}]` : ''}`).join('\n')
     try { void this.send(`问题 #${id}\n${rendered}\n回复 /answer ${id} 答案1 | 答案2`).catch((error) => this.rejectQuestion(id, error instanceof Error ? error : new Error(String(error)))) }
     catch (error) { this.rejectQuestion(id, error instanceof Error ? error : new Error(String(error))) }
     return answer

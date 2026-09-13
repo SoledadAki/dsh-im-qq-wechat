@@ -31,5 +31,5 @@ jobs:
       - run: npm install --global pnpm@11.19.0
       - run: pnpm install --frozen-lockfile
       # prepack runs types, all tests, build, and browser bundle verification.
-      - run: pnpm pack
+      - run: pnpm run release:check
       - run: pnpm audit --audit-level=moderate

@@ -8,21 +8,23 @@ declare global {
 type RpcResult = { ok: true; value: any } | { ok: false; error: { message: string } }
 interface Rpc { call(channel: string, endpoint: string, payload?: unknown): Promise<RpcResult> }
 
-// rc.6 client-modules requires synchronous registration from a classic IIFE.
+// Harness client-modules requires synchronous registration from a classic IIFE.
 window.__ModuleLoader__!.load({
   id: 'dsh-im-qq-wechat',
   factory: (require) => {
     const React = require('react')
     const { useState, useEffect, useCallback } = React
     const controllerOf = (rpc: Rpc) => ({
-      status: () => rpc.call('/qqbot', 'status', {}),
-      begin: (channel: string) => rpc.call('/qqbot', 'begin', { channel }),
-      verify: (channel: string, code: string) => rpc.call('/qqbot', 'verify', { channel, code }),
-      configure: (channel: string, values: Record<string, string>) => rpc.call('/qqbot', 'configure', { channel, values }),
-      unbind: (channel: string) => rpc.call('/qqbot', 'unbind', { channel }),
-      disconnect: (channel: string) => rpc.call('/qqbot', 'disconnect', { channel }),
-      connect: (channel: string) => rpc.call('/qqbot', 'connect', { channel }),
+      status: () => rpc.call('/api/qqbot', 'status', {}),
+      begin: (channel: string) => rpc.call('/api/qqbot', 'begin', { channel }),
+      cancel: (channel: string) => rpc.call('/api/qqbot', 'cancel', { channel }),
+      verify: (channel: string, code: string) => rpc.call('/api/qqbot', 'verify', { channel, code }),
+      configure: (channel: string, values: Record<string, string>) => rpc.call('/api/qqbot', 'configure', { channel, values }),
+      unbind: (channel: string) => rpc.call('/api/qqbot', 'unbind', { channel }),
+      disconnect: (channel: string) => rpc.call('/api/qqbot', 'disconnect', { channel }),
+      connect: (channel: string) => rpc.call('/api/qqbot', 'connect', { channel }),
     })
+    const errorText = (error: unknown) => error instanceof Error ? error.message : '连接失败，请确认 Harness 正在运行后重试'
     type Controller = ReturnType<typeof controllerOf>
 
     const labels: Record<string, string> = {
@@ -43,9 +45,11 @@ window.__ModuleLoader__!.load({
       const [appSecret, setAppSecret] = useState('')
       const [botId, setBotId] = useState('')
       const [secret, setSecret] = useState('')
+      const [error, setError] = useState('')
       const [busy, setBusy] = useState(false)
       const submit = async () => {
         setBusy(true)
+        setError('')
         try {
           const values: Record<string, string> = channel === 'telegram'
             ? { token }
@@ -53,11 +57,12 @@ window.__ModuleLoader__!.load({
               ? { botId, secret }
               : { appId, appSecret, domain: 'feishu' }
           const result = await controller.configure(channel, values)
-          if (!result.ok) window.alert(result.error.message)
+          if (!result.ok) setError(result.error.message)
           else { setToken(''); setAppSecret(''); setSecret(''); await onRefresh() }
-        } finally { setBusy(false) }
+        } catch (error) { setError(errorText(error)) } finally { setBusy(false) }
       }
       return <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+        {error && <p role="alert" style={{ color: '#b42318' }}>{error}</p>}
         {channel === 'telegram' && <input type="password" value={token} placeholder="Bot Token" onChange={(e: any) => setToken(e.target.value)} />}
         {channel === 'wecom' && <>
           <input value={botId} placeholder="企业微信 Bot ID" onChange={(e: any) => setBotId(e.target.value)} />
@@ -77,15 +82,17 @@ window.__ModuleLoader__!.load({
       const [showManual, setShowManual] = useState(false)
       // WeChat QR binding is confirmed in the WeChat client; no captcha/code
       // input is needed here.
+      const [error, setError] = useState('')
       const [busy, setBusy] = useState(false)
       const [starting, setStarting] = useState(false)
       const act = async (operation: () => Promise<RpcResult | void>) => {
         setBusy(true)
+        setError('')
         try {
           const result = await operation()
-          if (result && !result.ok) window.alert(result.error.message)
+          if (result && !result.ok) setError(result.error.message)
           await onRefresh()
-        } finally { setBusy(false) }
+        } catch (error) { setError(errorText(error)) } finally { setBusy(false) }
       }
       const begin = () => {
         setStarting(true)
@@ -98,6 +105,7 @@ window.__ModuleLoader__!.load({
           <h4 style={{ margin: 0, fontSize: 16 }}>{labels[channel] ?? channel}</h4>
           <span style={{ color: cs.connected ? '#1e7e34' : '#b42318', fontSize: 13, whiteSpace: 'nowrap' }}>{cs.connected ? '✓ 已连接' : '× 未连接'}</span>
         </div>
+        {error && <p role="alert" style={{ color: '#b42318' }}>{error}</p>}
         {cs.error && <p style={{ color: '#b42318', fontSize: 12, marginBottom: 4 }}>{cs.error}</p>}
         {starting && <p style={{ color: '#687386', fontSize: 12, margin: '8px 0 0' }}>正在生成二维码…</p>}
         {cs.state === 'idle' && hasQr && <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
@@ -108,6 +116,7 @@ window.__ModuleLoader__!.load({
         {cs.state === 'awaiting-code' && cs.code && <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: '#f6f8fb' }}><b>配对码：{cs.code}</b><p style={{ fontSize: 12, color: '#687386', marginBottom: 0 }}>请用你的账号私聊机器人发送此配对码。绑定后只有该账号能控制 Harness。</p></div>}
         {cs.state === 'awaiting-code' && !manual && cs.qrDataUrl && <div style={{ marginTop: 12, display: 'grid', gap: 8 }}><QrView url={cs.qrDataUrl} channel={channel} /></div>}
         {cs.state === 'bound' && <p style={{ fontSize: 13, color: '#475467' }}>已绑定用户：{cs.boundUserId ?? '平台授权范围'}</p>}
+        {cs.state === 'awaiting-code' && hasQr && <button disabled={busy && !starting} onClick={() => void act(() => controller.cancel(channel))}>取消绑定</button>}
         {cs.state !== 'idle' && <div style={{ display: 'flex', gap: 8, marginTop: 10 }}><button disabled={busy} onClick={() => void act(() => controller.unbind(channel))}>解绑</button>{cs.connected ? <button disabled={busy} onClick={() => void act(() => controller.disconnect(channel))}>断开</button> : <button disabled={busy} onClick={() => void act(() => controller.connect(channel))}>重连</button>}</div>}
       </section>
     }
@@ -117,21 +126,22 @@ window.__ModuleLoader__!.load({
       const [loading, setLoading] = useState(true)
       const [error, setError] = useState('')
       const refresh = useCallback(async () => {
-        const result = await controller.status()
-        if (result.ok) { setStatus(result.value); setError('') } else setError(result.error.message)
-        setLoading(false)
+        try {
+          const result = await controller.status()
+          if (result.ok) { setStatus(result.value); setError('') } else setError(result.error.message)
+        } catch (error) { setError(errorText(error)) } finally { setLoading(false) }
       }, [controller])
       useEffect(() => { void refresh(); const timer = setInterval(() => void refresh(), 2000); return () => clearInterval(timer) }, [refresh])
       const channels = Object.entries(status?.channels ?? {})
       return <div style={{ padding: 16, maxWidth: 960 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}><div><h3 style={{ margin: 0 }}>接入即时通信</h3><p style={{ color: '#687386', fontSize: 13, margin: '7px 0 0' }}>统一管理 QQ、微信、企业微信、飞书和 Telegram。消息、项目、会话、审核与流式回复共用同一套 Harness 能力。</p></div><button disabled={loading} title="刷新状态" aria-label="刷新状态" style={{ width: 34, height: 34, padding: 0, border: '1px solid #d0d5dd', borderRadius: 8, background: '#fff', color: '#475467', fontSize: 20, lineHeight: 1, cursor: loading ? 'default' : 'pointer' }} onClick={() => void refresh()}>↻</button></div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}><div><h3 style={{ margin: 0 }}>接入即时通信</h3><p style={{ color: '#687386', fontSize: 13, margin: '7px 0 0' }}>选择一个通道，扫码或填写机器人凭据，再按提示完成绑定即可开始。请先在 Harness 中配置可用模型。</p></div><button disabled={loading} title="刷新状态" aria-label="刷新状态" style={{ width: 34, height: 34, padding: 0, border: '1px solid #d0d5dd', borderRadius: 8, background: '#fff', color: '#475467', fontSize: 20, lineHeight: 1, cursor: loading ? 'default' : 'pointer' }} onClick={() => void refresh()}>↻</button></div>
         {error && <p style={{ color: '#b42318', fontSize: 12 }}>{error}</p>}
         {loading && channels.length === 0 ? <p style={{ color: '#687386' }}>正在读取渠道状态…</p> : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(300px,1fr))', gap: 16, marginTop: 16 }}>{channels.map(([channel, row]) => <ChannelCard key={channel} channel={channel} row={row} controller={controller} onRefresh={refresh} />)}</div>}
       </div>
     }
 
     const apply = (ctx: any) => {
-      const rpc = ctx.get('connection')?.rpc as Rpc | undefined
+      const rpc = ctx.connection?.rpc as Rpc | undefined
       if (!rpc) return
       const controller = controllerOf(rpc)
       ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'qq-weixin', order: 30, label: () => '接入即时通信', inject: () => ({ controller }) }, Panel))

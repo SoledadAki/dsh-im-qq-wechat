@@ -1,22 +1,14 @@
-/**
- * Agent 生命周期桥：稳定 SessionId 创建/恢复 Agent、挂载 preset、指定 cwd、
- * 实现 AgentSetupCommit，并用官方工厂构造带 MessageId 的 UserMessage。
- *
- * 类型说明：Agent/AgentHandle 等对象来自 ctx.agents / ctx.agents.create()
- * 的返回值，本文件用结构类型（本地接口）描述，不导入未验证的类型名；
- * 运行时 import 全部是 rc.6 真实公开 export（见文件底部注释）。
- */
+/** Persistent Agent lifecycle using the public Harness 0.1.5-rc.2 contracts. */
 
 import { randomBytes } from 'node:crypto'
 
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { MessageSource, UserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionId as SessionIdType } from '@deepseek-ai/dsh-session'
 import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { ChannelKind } from './channel.js'
 import { bindingKeyFor } from './channel.js'
-import type { SessionEventLike } from './correlation.js'
 
 /* ------------------------------------------------------------------ *
  * MessageSourceMap 扩展：加入 qq / wechat 两种来源 kind。
@@ -107,61 +99,13 @@ export function buildInboundMessage(input: {
  * ctx.agents 服务的结构视图（运行时由 @deepseek-ai/dsh-agent + dsh-agent-loop
  * 提供；create/resume 签名与 typert 注册表一致）。
  * ------------------------------------------------------------------ */
-export interface SessionLike {
-  readonly id: SessionIdType
-  readonly events: ReadonlyArray<SessionEventLike>
-  append(type: string, data: unknown): unknown
-}
-
-export interface AgentLike {
-  readonly id: SessionIdType
-  readonly session: SessionLike
-  readonly status: 'idle' | 'running'
-  readonly options?: { readonly provider?: string; readonly model?: string }
-  followup(message: UserMessage): void
-  steer(message: UserMessage): void
-  inject(message: UserMessage): void
-  cancel(cause: { readonly kind: 'user' }): void
-  whenIdle(): Promise<void>
-}
-
-export interface AgentSetupCommitLike {
-  commit(): void
-}
-
-export interface AgentHandleLike {
-  readonly agent: AgentLike
-  dispose(): Promise<void> | void
-}
-
-export interface CreateAgentOptionsLike {
-  readonly sessionId: SessionIdType
-  readonly seed?: ReadonlyArray<SessionEventLike>
-  readonly meta?: {
-    readonly cwd?: string
-    readonly agentPreset?: string
-    readonly parentSession?: SessionIdType
-    readonly seedLength?: number
-  }
-  readonly agentOptions?: { readonly provider?: string; readonly model?: string }
-  readonly signal?: AbortSignal
-  readonly setup?: (
-    agentCtx: unknown,
-  ) => Promise<AgentSetupCommitLike | void> | AgentSetupCommitLike | void
-}
-
-export interface ResumeAgentOptionsLike {
-  readonly resumeSessionId: SessionIdType
-  readonly agentOptions?: { readonly provider?: string; readonly model?: string }
-  readonly signal?: AbortSignal
-  readonly setup?: CreateAgentOptionsLike['setup']
-}
-
-export interface AgentsServiceLike {
-  create(options: CreateAgentOptionsLike): Promise<AgentHandleLike>
-  resume(options: ResumeAgentOptionsLike): Promise<AgentHandleLike>
-  get(id: SessionIdType): AgentLike | undefined
-}
+export type SessionLike = import('@deepseek-ai/dsh-session').Session
+export type AgentLike = import('@deepseek-ai/dsh-agent').Agent
+export type AgentSetupCommitLike = import('@deepseek-ai/dsh-agent').AgentSetupCommit
+export type AgentHandleLike = import('@deepseek-ai/dsh-agent').AgentHandle
+export type CreateAgentOptionsLike = import('@deepseek-ai/dsh-agent').CreateAgentOptions
+export type ResumeAgentOptionsLike = import('@deepseek-ai/dsh-agent').ResumeAgentOptions
+export type AgentsServiceLike = Pick<import('@deepseek-ai/dsh-agent').AgentRegistry, 'create' | 'resume' | 'get'>
 
 export interface PresetsLike {
   resolve(id?: string): Promise<{ readonly id: string }>
@@ -261,16 +205,17 @@ export class AgentManager {
     const key = bindingKeyFor(channel, userId, this.opts.sharedSession)
     const suffix = `${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
     const sessionId = SessionId(`qq-weixin-${key.replace(/[^a-zA-Z0-9-]/g, '-')}-model-${suffix}`)
-    const seed = [...source.session.events]
+    const seed = [...source.session.snapshotEvents()]
     const handle = await this.agents.create({
       sessionId,
       seed,
+      inheritedEventCount: SessionLogOffset(seed.length),
       meta: {
         ...(cwd !== undefined && cwd !== ''
           ? { cwd }
           : this.opts.cwd !== undefined && this.opts.cwd !== '' ? { cwd: this.opts.cwd } : {}),
         parentSession: source.id,
-        seedLength: seed.length,
+        isSeeded: true,
         ...(presetId !== undefined ? { agentPreset: presetId } : {}),
       },
       agentOptions: model,
@@ -326,8 +271,7 @@ export class AgentManager {
   }
 
   private setup(presetId?: string, initializeApproval = true): NonNullable<CreateAgentOptionsLike['setup']> {
-    return async (agentCtx: unknown): Promise<AgentSetupCommitLike | void> => {
-      const agent = (agentCtx as { agent?: AgentLike }).agent
+    return async (agentCtx: import('@deepseek-ai/cordis').Context, agent: AgentLike): Promise<AgentSetupCommitLike | void> => {
       if (agent !== undefined && initializeApproval) {
         // 真实 Session 类型通过官方运行时函数签名取得，避免编造类型。
         const session = agent.session as unknown as Parameters<typeof setApprovalPolicy>[0]
@@ -344,14 +288,3 @@ export class AgentManager {
     }
   }
 }
-
-/*
- * 运行时 import 一览（全部为 rc.6 真实公开 export，源码路径见答案末尾）：
- *   createUserMessage, MessageId — @deepseek-ai/dsh-llm（message.js）
- *   SessionId                      — @deepseek-ai/dsh-session（types.js）
- *   setApprovalPolicy              — @deepseek-ai/dsh-user-approval（types/index.js）
- * 类型 import（npm 包随包发布 lib/types/**\/*.d.ts）：
- *   MessageSource, UserMessage     — @deepseek-ai/dsh-llm
- *   SessionIdType                  — @deepseek-ai/dsh-session
- * 未导入：Agent/AgentHandle 等类型使用本地结构接口（未验证的导出名不编造）。
- */

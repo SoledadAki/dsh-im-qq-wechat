@@ -1,128 +1,80 @@
 # dsh-im-qq-wechat
 
-面向 DeepSeek Harness 的即时通信插件：把 QQ、微信、企业微信、飞书和 Telegram 接入同一套持久 Agent 会话。
+把 QQ、微信、企业微信、飞书和 Telegram 接入 DeepSeek Harness。安装预构建插件，在 Harness 设置中绑定账号，即可通过聊天发送任务、接收回复和处理工具审批。
 
-`dsh-im-qq-wechat` is a DeepSeek Harness Host plugin that brings QQ, WeChat, WeCom, Feishu, and Telegram into persistent Agent sessions. It is designed primarily for mainland-China IM platforms, while Telegram is supported as an international option.
+## 安装
 
-## 项目定位 · Project focus
+需要已能正常使用的 **DeepSeek Harness Web 0.1.5-rc.2** 和 Node.js 22+。请先在 Harness 中配置模型。本项目当前不声明兼容所有后续预览版。
 
-| 中文 | English |
-| --- | --- |
-| 主要服务国内 IM 场景：QQ、微信、企业微信、飞书 | Built first for mainland-China IM: QQ, WeChat, WeCom, and Feishu |
-| Telegram 作为可选的跨境通道 | Telegram is available as an optional international channel |
-| 消息直接进入 DeepSeek Harness Agent，不依赖独立 HTTP 轮询层 | Messages go directly to DeepSeek Harness Agents without a separate HTTP polling layer |
-| 多平台共享会话、项目、模型、思考强度和安全审核能力 | Sessions, workspaces, models, reasoning effort, and approvals are managed consistently across platforms |
+从 [GitHub Releases](https://github.com/SoledadAki/dsh-im-qq-wechat/releases) 下载对应版本的 `.tgz` 安装包，然后在下载目录执行：
 
-## 功能矩阵 · Feature matrix
-
-| 通道 / Channel | 接入方式 / Connection | 流式回复 / Streaming | 正在输入 / Typing | 备注 / Notes |
-| --- | --- | ---: | ---: | --- |
-| QQ | 官方 Gateway 扫码绑定 | ✅ 原生流式 | ✅ | C2C 私聊与群聊 @ |
-| 微信 / WeChat | iLink 扫码绑定 | — | ✅ | 不支持原生编辑流时自动发送完整回复 |
-| 企业微信 / WeCom | 官方扫码创建机器人，或 Bot ID + Secret | ✅ WebSocket 流式 | ✅ 思考状态 | 支持官方 AI Bot WebSocket |
-| 飞书 / Feishu | Device Flow 扫码创建应用，或 App ID + Secret | ✅ CardKit 流式卡片 | ✅ OnIt 状态 | 支持 Feishu 与 Lark 域名 |
-| Telegram | Bot Token 配置 | ✅ 编辑消息流式 | ✅ typing | 私聊或 @机器人消息 |
-
-## 核心能力 · Core capabilities
-
-| 能力 | 说明 |
-| --- | --- |
-| 会话管理 | `/new`、`/reset`、`/list`、`/use`，每个用户可维护独立会话历史 |
-| 项目管理 | `/work <路径>` 切换 Agent 工作区；真实路径只用于执行，不默认转发到 IM |
-| 模型管理 | `/model` 查看可用模型，支持编号或 `provider/model-id` 切换 |
-| 思考强度 | `/think` 查看或调整模型支持的 reasoning effort |
-| 安全审核 | `/safe` 查看或切换只读、写入、完全访问等级；审核可在 IM 中确认或拒绝 |
-| 工具进度 | 原生流式通道显示正在思考、工具调用和最终回复 |
-| 凭据安全 | Token、Secret 仅交给 Harness credentials，插件设置只保存非敏感绑定元数据 |
-| 隐私保护 | `redactWorkspacePaths: true` 默认隐藏已知本机绝对路径 |
-
-## 安装 · Installation
-
-要求 Node.js 22+ 与 DeepSeek Harness rc.6 或兼容版本。
-
-Requires Node.js 22+ and DeepSeek Harness rc.6 (or a compatible release).
-
-```bash
-pnpm install --frozen-lockfile
-pnpm run typecheck
-pnpm test
-pnpm run build
-pnpm pack
-dsh plugin --profile web add ./dsh-im-qq-wechat-0.4.1.tgz
+```sh
+dsh plugin --profile web add ./dsh-im-qq-wechat-0.5.0.tgz
 dsh --profile web
 ```
 
-源码开发与打包使用 Node.js 22.13+、pnpm 11.19.0；运行兼容性基线仍为 Harness rc.6。
+`.tgz` 是正式安装文件，不是历史数据备份。安装时由 Harness 的插件管理器解析运行依赖；用户无需克隆源码、运行构建、修改 YAML 或手动启动 QQ / 微信子进程。首次安装依赖需要联网。
 
-维护文档：[更新记录](./CHANGELOG.md) · [安装与排障](./docs/OPERATIONS.md) · [开发与发布](./CONTRIBUTING.md) · [安全边界](./SECURITY.md)。
+**发布状态：0.5.0 是待发布版本。只有维护者将安装包上传到 Release 后，上面的下载入口才会出现该版本。** 不要用 GitHub 自动生成的 Source code 压缩包替代插件安装包，也不要直接安装当前源码分支：源码不包含预构建入口。
 
-`pnpm run check` 执行类型检查、全部测试和构建；`pnpm pack` 会自动执行发布前检查。CI 配置覆盖 Windows / Linux 与 Node 22.13 / 24，真实平台扫码及收发需要单独联调。
+## 首次使用
 
-## 默认配置 · Default configuration
+1. 重启 Harness，打开设置中的 **接入即时通信**。
+2. 选择需要的通道，扫码或填写自己的机器人凭据。
+3. 按页面提示完成平台授权或私聊配对码绑定。
+4. 向机器人发送任务；需要工具审核时，根据编号回复 `/同意` 或 `/拒绝`。
 
-```yaml
-channels: [qq, wechat, wecom, feishu, telegram]
-sharedSession: false
-preset: ''
-cwd: ''
-stateDir: ''
-sourceKind: user
-approvalPolicy: ask
-replyTimeoutMs: 0
-redactWorkspacePaths: true
-```
+账号授权是必要配置，插件不能代替你创建平台账号或提供模型密钥。没有绑定的通道不需要配置凭据。
 
-`redactWorkspacePaths` 保留真实工作目录供 Harness 执行，但会在 QQ、微信、企业微信、飞书和 Telegram 的普通回复、命令卡片及流式回复中隐藏已知绝对路径。只有在受控排障环境中才建议设为 `false`。
+| 通道 | 接入方式 | 回复形式 |
+| --- | --- | --- |
+| QQ | 扫码授权 | 原生流式、完整长回复分段 |
+| 微信 | 扫码授权 | 完整回复分段 |
+| 企业微信 | 扫码或 Bot ID / Secret | WebSocket 流式 |
+| 飞书 | 扫码或 App ID / Secret | 流式卡片 |
+| Telegram | Bot Token + 私聊配对码 | 编辑消息流式 |
 
-`redactWorkspacePaths` keeps the real working directory available to Harness while hiding known absolute paths in outbound messages. Set it to `false` only in a controlled debugging environment.
+## 常用命令
 
-## 常用命令 · Common commands
-
-| 命令 / Command | 作用 / Purpose |
+| 命令 | 用途 |
 | --- | --- |
-| `/help` | 查看精简帮助 / Show concise help |
-| `/new [名称]` | 新建会话 / Create a session |
-| `/reset` | 清除当前会话上下文 / Reset current context |
-| `/model [编号\|provider/model]` | 查看或切换模型 / List or switch model |
-| `/work <路径>` | 切换项目目录 / Switch workspace |
-| `/list`、`/use <编号或 ID>` | 查看和切换会话 / List and select sessions |
-| `/think [off\|low\|medium\|high\|max]` | 调整思考强度 / Set reasoning effort |
-| `/safe [read\|write\|full]` | 调整安全等级 / Set approval policy |
-| `/stop` | 停止当前任务 / Stop the current task |
+| `/help` | 查看帮助 |
+| `/new [名称]` | 新建会话 |
+| `/list`、`/use <编号>` | 查看、切换会话 |
+| `/reset` | 清空当前上下文 |
+| `/work <路径>` | 切换工作目录 |
+| `/model`、`/think` | 查看或修改模型、思考强度 |
+| `/safe` | 查看或修改安全等级 |
+| `/stop` | 停止任务 |
 
-命令名称和参数支持中英文混用，例如 `/think off`、`/思考 关闭`、`/model 2`。
+## 升级与卸载
 
-Commands and arguments accept mixed Chinese and English, for example `/think off`, `/思考 关闭`, and `/model 2`.
+升级时安装新版本 `.tgz` 并重启 Harness；绑定和会话使用 Harness settings / credentials 持久化，0.5.0 不修改存储格式。卸载前可在设置页解绑账号。
 
-## 绑定与审核 · Binding and approvals
-
-在 Harness Web 的“接入即时通信”设置中绑定通道。QQ、微信、企业微信和飞书支持扫码流程；Telegram 使用 Bot Token。绑定后，首次私聊发送页面显示的配对码即可成为 owner。
-
-Use the “即时通信 / IM connections” section in Harness Web to connect a channel. QR binding is available for QQ, WeChat, WeCom, and Feishu; Telegram uses a Bot Token. After connecting, send the displayed pairing code in a private chat to become the owner.
-
-当 Agent 需要审核时，机器人会发送编号。直接回复以下任一形式即可：
-
-```text
-/同意 <编号>       /approve <编号>
-/拒绝 <编号>       /reject <编号>
+```sh
+dsh plugin --profile web remove dsh-im-qq-wechat
 ```
 
-## 开发与发布 · Development and release
+## 使用边界与排障
 
-```bash
-pnpm run typecheck
-pnpm test
-pnpm run build
+- 当前保证的是文本任务链路，不能把平台媒体下载能力理解为完整多模态 Agent 支持。
+- 用户问题和工具审批按 Agent 路由到发起任务的 IM 通道；Harness 自身的 Web 会话仍由 Web 回答。
+- 设置页无法加载：确认安装的是本插件 `.tgz`、已重启 Web，并检查 Harness 版本。
+- Telegram 持续重连：检查网络、Token、已有 Webhook 和重复运行的机器人实例。
+- 已连接但不响应：检查绑定用户与群聊 @ / 回复条件；先用绑定账号私聊测试。
+- 默认隐藏已知工作区路径并保留工具审批。配对码和机器人密钥不要公开分享。插件使用 Harness 的执行权限，不是独立沙箱。
+
+更多资料见仓库中的 [运维指南](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/docs/OPERATIONS.md)、[安全说明](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/SECURITY.md) 和 [更新记录](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/CHANGELOG.md)。
+
+## 开发者
+
+源码、测试、CI 和维护文档保留在 Git 仓库中，不进入用户安装包。开发需要 Node.js 22.13+、pnpm 11.19.0。
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run release:check
 ```
 
-客户端构建产物必须是 classic-script IIFE，并同步注册 `dsh-im-qq-wechat`；构建脚本会拒绝 ESM 语法或错误模块 ID。
+该命令运行类型检查、测试、构建，并在独立目录中以禁用安装脚本的方式安装和验证生成的包，再启动真实 Harness 0.1.5-rc.2，验证浏览器模块、认证接口和 Agent 创建/分叉/释放。安装文件位于 `dist/`。真实账号扫码、收发及 Host Web 联调仍需按运维指南验收。
 
-The client bundle must be a classic-script IIFE and synchronously register `dsh-im-qq-wechat`; the build verification rejects ESM syntax and mismatched module IDs.
-
-QQ/微信通道基于已验证的 LiaoData 实现；飞书、Telegram、可编辑流式消息参考 [xmanrui/dsh-im](https://github.com/xmanrui/dsh-im)；模型查看与切换思路参考 [tencent-connect/dsh-qqbot](https://github.com/tencent-connect/dsh-qqbot)。第三方许可证与来源见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
-
-The QQ/WeChat transports are based on the reviewed LiaoData implementation. Feishu, Telegram, and editable streaming patterns were informed by [xmanrui/dsh-im](https://github.com/xmanrui/dsh-im); model discovery and switching were informed by [tencent-connect/dsh-qqbot](https://github.com/tencent-connect/dsh-qqbot). See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for attribution and licenses.
-
-## 许可证 · License
-
-MIT. See [LICENSE](./LICENSE).
+MIT。第三方来源见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。

@@ -9,6 +9,7 @@
  */
 
 import type { ChannelKind, ChannelReplyStream } from './channel.js'
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 
 /** 最小的会话事件视图（供纯函数与测试使用，不依赖真实 Session 类型）。 */
 export interface SessionEventLike {
@@ -103,6 +104,24 @@ export function describeTurnReason(reason: unknown): string {
 export class InboundTracker {
   private readonly byExtId = new Map<string, TrackedInbound>()
   private readonly callTurns = new Map<string, number>()
+  private readonly attempts = new Map<string, { id: string; revision: number; turn: number; index: number }>()
+
+  onAssistantStream(sessionId: string, frame: AssistantStreamFrame): TrackedInbound[] {
+    if (frame.type === 'start') {
+      if (!this.activeForTurn(sessionId, frame.turn).length) return []
+      this.attempts.set(sessionId, { id: frame.attemptId, revision: frame.revision, turn: frame.turn, index: -1 })
+      this.setAssistantText(sessionId, frame.turn, '')
+      return []
+    }
+    const attempt = this.attempts.get(sessionId)
+    if (!attempt || attempt.id !== frame.attemptId || attempt.revision !== frame.revision) return []
+    if (frame.type === 'end') { this.attempts.delete(sessionId); return [] }
+    if (frame.index <= attempt.index) return []
+    attempt.index = frame.index
+    return frame.chunk.type === 'text-delta'
+      ? this.appendTextDelta(sessionId, attempt.turn, frame.chunk.text)
+      : []
+  }
 
   register(input: {
     extId: string
@@ -193,6 +212,7 @@ export class InboundTracker {
 
   /** Agent 被 dispose（agent/disposed）时清理其未决消息。 */
   dropSession(sessionId: string): void {
+    this.attempts.delete(sessionId)
     for (const [extId, tracked] of this.byExtId) {
       if (tracked.sessionId === sessionId) { void tracked.stream?.cancel(); this.byExtId.delete(extId) }
     }
@@ -217,9 +237,11 @@ export class InboundTracker {
     for (const tracked of this.byExtId.values()) void tracked.stream?.cancel()
     this.byExtId.clear()
     this.callTurns.clear()
+    this.attempts.clear()
   }
 
   private clearCallTurns(sessionId: string, turn: number): void {
+    if (this.attempts.get(sessionId)?.turn === turn) this.attempts.delete(sessionId)
     for (const [key, mappedTurn] of this.callTurns) {
       if (mappedTurn === turn && key.startsWith(`${sessionId}:`)) this.callTurns.delete(key)
     }

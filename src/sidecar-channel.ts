@@ -14,6 +14,7 @@ import type {
   InboundTextMessage,
 } from './channel.js'
 import { SidecarClient, type SidecarFrame } from './sidecar-client.js'
+import { splitMessageText } from './editable-stream.js'
 
 export interface PersistedChannelBinding {
   readonly accountId: string
@@ -171,14 +172,16 @@ export class SidecarChannelAdapter implements ChannelAdapter {
 
   async sendText(userId: string, text: string, replyToId?: string): Promise<void> {
     const binding = this.requireOwner(userId)
+    for (const textChunk of splitMessageText(text, this.kind === 'qq' ? 5000 : 4000)) {
     const frame = await this.client.request('message.send', {
       account_id: binding.accountId,
       target_id: userId,
       reply_to_id: replyToId ?? '',
-      text: text.slice(0, this.kind === 'qq' ? 5000 : 4000),
+      text: textChunk,
       proactive: replyToId === undefined,
     }, ['message.sent', 'message.send_failed'])
     if (frame.type === 'message.send_failed') throw new Error(`${this.kind} message send failed`)
+    }
   }
 
   async openReplyStream(userId: string, replyToId: string): Promise<ChannelReplyStream | undefined> {
@@ -197,8 +200,9 @@ export class SidecarChannelAdapter implements ChannelAdapter {
       async finish(text) {
         if (closed) return
         closed = true
-        await request('stream.finish', { text: text.slice(0, 5000) })
-        for (let offset = 5000; offset < text.length; offset += 5000) await sendRemainder(text.slice(offset, offset + 5000))
+        const chunks = splitMessageText(text, 5000)
+        await request('stream.finish', { text: chunks[0] ?? '处理完成。' })
+        for (const chunk of chunks.slice(1)) await sendRemainder(chunk)
       },
       async cancel() { if (closed) return; closed = true; await request('stream.cancel') },
     }
@@ -206,6 +210,7 @@ export class SidecarChannelAdapter implements ChannelAdapter {
 
   async askApproval(userId: string, prompt: ApprovalPrompt, signal?: AbortSignal): Promise<ApprovalOutcome> {
     this.requireOwner(userId)
+    if (signal?.aborted) return 'cancelled'
     const id = this.interactionId()
     const timeoutMs = this.options.interactionTimeoutMs ?? 5 * 60_000
     const answer = new Promise<ApprovalOutcome>((resolve) => {
@@ -221,10 +226,10 @@ export class SidecarChannelAdapter implements ChannelAdapter {
       if (signal?.aborted === true) onAbort()
     })
     try {
-      await this.sendText(userId,
+      void this.sendText(userId,
         `需要安全审核 #${id}\n操作：${prompt.toolName}${prompt.reason ? `\n原因：${prompt.reason}` : ''}` +
         `\n回复 /同意 ${id} 或 /拒绝 ${id}` +
-        `\n（也可用 /approve 或 /reject）`)
+        `\n（也可用 /approve 或 /reject）`).catch(() => this.finishInteraction(id, 'unavailable'))
     } catch {
       this.finishInteraction(id, 'unavailable')
     }
@@ -233,6 +238,8 @@ export class SidecarChannelAdapter implements ChannelAdapter {
 
   async askQuestion(userId: string, questions: ReadonlyArray<BridgeQuestion>, signal?: AbortSignal): Promise<string[]> {
     this.requireOwner(userId)
+    if (signal?.aborted) throw new Error('用户问题已取消')
+    if (questions.length === 0) return []
     const id = this.interactionId()
     const timeoutMs = this.options.interactionTimeoutMs ?? 5 * 60_000
     const answer = new Promise<string[]>((resolve, reject) => {
@@ -247,12 +254,13 @@ export class SidecarChannelAdapter implements ChannelAdapter {
       signal?.addEventListener('abort', onAbort, { once: true })
       if (signal?.aborted === true) onAbort()
     })
+    void answer.catch(() => undefined)
     const rendered = questions.map((question, index) => {
       const choices = question.options?.map((option) => option.label).join(' / ')
-      return `${index + 1}. ${question.question}${choices ? ` [${choices}]` : ''}`
+      return `${index + 1}. ${question.question}${question.detail ? `\n${question.detail}` : ''}${choices ? ` [${choices}]` : ''}`
     }).join('\n')
     try {
-      await this.sendText(userId, `问题 ${id}\n${rendered}\n回复 /answer ${id} 答案1 | 答案2`)
+      void this.sendText(userId, `问题 ${id}\n${rendered}\n回复 /answer ${id} 答案1 | 答案2`).catch((error) => this.rejectQuestion(id, error instanceof Error ? error : new Error(String(error))))
     } catch (error) {
       this.rejectQuestion(id, error instanceof Error ? error : new Error(String(error)))
     }

@@ -2,16 +2,18 @@
 
 ## 安装与升级
 
-运行环境：Node.js 22+，DeepSeek Harness rc.6。源码开发与打包需要 Node.js 22.13+、pnpm 11.19.0。
+运行环境：Node.js 22+，DeepSeek Harness 0.1.5-rc.2。源码开发与打包需要 Node.js 22.13+、pnpm 11.19.0。
+
+从 GitHub Release 下载预构建安装包，在下载目录运行：
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm pack
-dsh plugin --profile web add ./dsh-im-qq-wechat-0.4.1.tgz
+dsh plugin --profile web add ./dsh-im-qq-wechat-0.5.0.tgz
 dsh --profile web
 ```
 
-升级前关闭插件并备份实际使用的 Harness profile、插件状态和 credentials 存储；不要将备份放到 Git 仓库。保留旧版 tgz。0.4.1 没有变更持久化格式；如需回滚，停止 Host 并安装保留的旧包。只有状态损坏时才从对应备份恢复，避免覆盖升级后的会话。
+不需要运行 pnpm install / build。首次安装需要联网下载运行依赖。源码开发和发布流程见 CONTRIBUTING.md。
+
+升级前关闭插件并备份实际使用的 Harness profile、插件状态和 credentials 存储；不要将备份放到 Git 仓库。保留旧版 tgz。0.5.0 没有变更持久化格式；如需回滚，停止 Host 并安装保留的旧包。只有状态损坏时才从对应备份恢复，避免覆盖升级后的会话。
 
 ## 真实通道验收
 
@@ -29,7 +31,7 @@ QQ / 微信还应检查扫码取消和重新绑定。飞书、企业微信及 Te
 
 | 现象 | 检查与处理 |
 | --- | --- |
-| 设置页没有插件入口 | 确认安装了包含 lib/client.js 的 tgz；源码构建应输出 client_bundle_ok；核对 Host rc.6 兼容性。 |
+| 设置页没有插件入口 | 确认安装了包含 lib/client.js 的 tgz；源码构建应输出 client_bundle_ok；核对 Host 0.1.5-rc.2 兼容性。 |
 | 已连接但不执行消息 | 检查 owner 是否完成私聊配对、群聊是否满足 @ / 回复条件，以及通道是否仅支持当前消息类型。 |
 | sidecar handshake / request timed out | 检查 Node 可执行文件、sidecar 路径与 SDK 依赖完整性；重启后检查已脱敏的错误日志。 |
 | sidecar protocol failure | 输出不符合认证 JSON-lines 协议；检查是否误将调试日志写入 stdout。调试日志应使用 stderr。 |

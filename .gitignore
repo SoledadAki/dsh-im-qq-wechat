@@ -13,3 +13,6 @@ lib/
 .env
 .env.*
 !.env.example
+
+# Release artifacts
+dist/

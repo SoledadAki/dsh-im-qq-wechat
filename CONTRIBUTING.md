@@ -1,6 +1,6 @@
 # 开发与维护
 
-使用 Node.js 22.13+ 和 pnpm 11.19.0。Host peer dependencies 固定为 rc.6；不要为消除版本提示直接放宽范围。
+使用 Node.js 22.13+ 和 pnpm 11.19.0。Host peer dependencies 固定为 0.1.5-rc.2；不要为消除版本提示直接放宽范围。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -16,10 +16,10 @@ pnpm audit
 
 1. 更新 package.json 版本、README 安装包名称和 CHANGELOG。
 2. 执行 `pnpm install --frozen-lockfile` 与 `pnpm audit`。
-3. 执行 `pnpm pack`；prepack 会重新运行类型检查、全部测试、构建与浏览器 IIFE 验证。
+3. 执行 `pnpm run release:check`，安装包输出到 dist/；prepack 会重新运行类型检查、全部测试、构建与浏览器 IIFE 验证。
 4. 在独立 Harness profile 中安装生成的 tgz，按 docs/OPERATIONS.md 验收实际通道。
 5. 检查包内容不含凭据、状态目录和 node_modules；确认 CI 与真实通道验收结果后再创建版本标签和发布包。
 
-CI 只做构建和测试，不自动发布。没有真实账号的测试不能证明扫码、平台网络、审批回传和 Host Web 加载全部可用。记录实际测试过的 Harness、Node 与 SDK 版本。
+普通 CI 只做验证。推送与 package.json 版本匹配的 v* 标签会运行 release.yml，验证后发布 tgz 与 SHA256SUMS 到 GitHub Release；不会发布 npm 包。没有真实账号的测试不能证明扫码、平台网络、审批回传和 Host Web 加载全部可用。记录实际测试过的 Harness、Node 与 SDK 版本。
 
 依赖锁文件的修复不会覆盖用户既有 Harness 安装中的 peer dependencies；需要同时维护宿主环境。
