@@ -43,14 +43,20 @@
 Requires Node.js 22+ and DeepSeek Harness rc.6 (or a compatible release).
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm run typecheck
 pnpm test
 pnpm run build
 pnpm pack
-dsh plugin --profile web add ./dsh-im-qq-wechat-0.4.0.tgz
+dsh plugin --profile web add ./dsh-im-qq-wechat-0.4.1.tgz
 dsh --profile web
 ```
+
+源码开发与打包使用 Node.js 22.13+、pnpm 11.19.0；运行兼容性基线仍为 Harness rc.6。
+
+维护文档：[更新记录](./CHANGELOG.md) · [安装与排障](./docs/OPERATIONS.md) · [开发与发布](./CONTRIBUTING.md) · [安全边界](./SECURITY.md)。
+
+`pnpm run check` 执行类型检查、全部测试和构建；`pnpm pack` 会自动执行发布前检查。CI 配置覆盖 Windows / Linux 与 Node 22.13 / 24，真实平台扫码及收发需要单独联调。
 
 ## 默认配置 · Default configuration
 

@@ -1,6 +1,7 @@
 import type { ChannelReplyStream } from './channel.js'
 
 export function splitMessageText(value: string, limit: number): string[] {
+  if (!Number.isSafeInteger(limit) || limit < 2) throw new RangeError('message limit must be an integer of at least 2')
   const text = value.trim()
   if (!text) return []
   const chunks: string[] = []
@@ -9,6 +10,8 @@ export function splitMessageText(value: string, limit: number): string[] {
     let cut = remaining.lastIndexOf('\n', limit)
     if (cut < Math.floor(limit * 0.55)) cut = remaining.lastIndexOf(' ', limit)
     if (cut < Math.floor(limit * 0.55)) cut = limit
+    // Keep UTF-16 surrogate pairs intact at the platform length boundary.
+    if (cut > 0 && /[\uD800-\uDBFF]/.test(remaining[cut - 1]!) && /[\uDC00-\uDFFF]/.test(remaining[cut]!)) cut--
     chunks.push(remaining.slice(0, cut).trim())
     remaining = remaining.slice(cut).trimStart()
   }

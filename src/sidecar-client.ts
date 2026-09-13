@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createInterface, type Interface as ReadLineInterface } from 'node:readline'
 
 const PROTOCOL_VERSION = 1
 const MAX_FRAME_BYTES = 1024 * 1024
@@ -35,12 +34,13 @@ interface PendingRequest {
 /** Private authenticated JSON-lines transport for one platform sidecar. */
 export class SidecarClient {
   private process: ChildProcessWithoutNullStreams | undefined
-  private lines: ReadLineInterface | undefined
+  private input = Buffer.alloc(0)
   private readonly token = randomBytes(32).toString('hex')
   private readonly pending = new Map<string, PendingRequest>()
   private readonly listeners = new Set<(frame: SidecarFrame) => void>()
   private started: Promise<void> | undefined
   private stopping = false
+  private stopPromise: Promise<void> | undefined
 
   constructor(private readonly options: SidecarClientOptions) {}
 
@@ -50,6 +50,7 @@ export class SidecarClient {
   }
 
   start(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise.then(() => this.start())
     if (this.started !== undefined) return this.started
     this.started = this.spawnAndHandshake().catch((error) => {
       this.process?.kill()
@@ -101,12 +102,21 @@ export class SidecarClient {
   }
 
   async stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise
+    this.stopPromise = this.stopChild()
+    try { await this.stopPromise } finally { this.stopPromise = undefined }
+  }
+
+  private async stopChild(): Promise<void> {
     const child = this.process
     if (child === undefined) return
     this.stopping = true
     try {
-      const ack = this.request('shutdown', {}, ['shutdown.ack']).catch(() => undefined)
-      await Promise.race([ack, new Promise((resolve) => setTimeout(resolve, 2_000))])
+      const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+      this.write(this.frame('shutdown', {}))
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try { await Promise.race([exited, new Promise<void>((resolve) => { timer = setTimeout(resolve, 2_000) })]) }
+      finally { clearTimeout(timer) }
     } finally {
       if (child.exitCode === null) child.kill()
       this.cleanup(new Error('sidecar stopped'))
@@ -123,20 +133,49 @@ export class SidecarClient {
       env: { ...process.env, NO_COLOR: '1' },
     })
     this.process = child
+    const fail = (error: Error): void => {
+      if (this.process !== child) return
+      if (!this.stopping) this.options.logger.error(error.message)
+      child.kill()
+      this.cleanup(error)
+      this.process = undefined
+      this.started = undefined
+    }
+    child.once('error', fail)
+    child.stdin.on('error', fail)
+    child.stdout.on('error', fail)
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
       const message = chunk.trim()
       if (message !== '') this.options.logger.warn(`[sidecar] ${message.slice(0, 1000)}`)
     })
     child.once('exit', (code, signal) => {
+      if (this.process !== child) return
       const error = new Error(`sidecar exited (${code ?? signal ?? 'unknown'})`)
       if (!this.stopping) this.options.logger.error(error.message)
       this.cleanup(error)
       this.process = undefined
       this.started = undefined
     })
-    this.lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
-    this.lines.on('line', (line) => this.acceptLine(line))
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (this.process !== child) return
+      let offset = 0
+      while (offset < chunk.length) {
+        const newline = chunk.indexOf(10, offset)
+        const end = newline < 0 ? chunk.length : newline
+        if (this.input.length + end - offset > MAX_FRAME_BYTES) {
+          this.protocolFailure('oversized frame')
+          return
+        }
+        this.input = Buffer.concat([this.input, chunk.subarray(offset, end)])
+        if (newline < 0) return
+        const line = this.input.toString('utf8')
+        this.input = Buffer.alloc(0)
+        this.acceptLine(line)
+        if (this.process !== child) return
+        offset = newline + 1
+      }
+    })
 
     const id = randomUUID()
     const timeoutMs = this.options.handshakeTimeoutMs ?? 10_000
@@ -168,7 +207,9 @@ export class SidecarClient {
       this.protocolFailure('invalid JSON')
       return
     }
-    if (frame.v !== PROTOCOL_VERSION || frame.token !== this.token || typeof frame.type !== 'string') {
+    if (!frame || typeof frame !== 'object' || frame.v !== PROTOCOL_VERSION || frame.token !== this.token
+      || typeof frame.id !== 'string' || !frame.id || typeof frame.type !== 'string' || !frame.type
+      || !frame.payload || typeof frame.payload !== 'object' || Array.isArray(frame.payload)) {
       this.protocolFailure('invalid authenticated frame')
       return
     }
@@ -179,7 +220,9 @@ export class SidecarClient {
       pending.resolve(frame)
       return
     }
-    for (const listener of this.listeners) listener(frame)
+    for (const listener of this.listeners) {
+      try { listener(frame) } catch { this.options.logger.warn('sidecar event listener failed') }
+    }
   }
 
   private protocolFailure(reason: string): void {
@@ -187,11 +230,12 @@ export class SidecarClient {
     this.options.logger.error(error.message)
     this.process?.kill()
     this.cleanup(error)
+    this.process = undefined
+    this.started = undefined
   }
 
   private cleanup(error: Error): void {
-    this.lines?.close()
-    this.lines = undefined
+    this.input = Buffer.alloc(0)
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer)
       pending.reject(error)

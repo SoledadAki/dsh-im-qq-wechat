@@ -4,6 +4,14 @@ import { createEditableMessageStream, splitMessageText } from '../src/editable-s
 import { TelegramApi, validTelegramToken } from '../src/telegram-api.js'
 import { InboundTracker } from '../src/correlation.js'
 
+test('message splitting rejects invalid limits and preserves surrogate pairs', () => {
+  for (const limit of [0, -1, 1, 1.5, NaN, Infinity]) assert.throws(() => splitMessageText('hello', limit), RangeError)
+  const text = 'abcd😀你好😀abc'
+  const chunks = splitMessageText(text, 5)
+  assert.equal(chunks.join(''), text)
+  assert.ok(chunks.every((chunk) => chunk.length <= 5 && chunk.isWellFormed()))
+})
+
 test('Telegram token validation and Bot API request avoid redirects', async () => {
   assert.equal(validTelegramToken('123456:abcdefghijklmnopqrstuvwxyz_1234'), true)
   assert.equal(validTelegramToken('bad-token'), false)
