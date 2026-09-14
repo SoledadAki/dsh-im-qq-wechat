@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
+import vm from 'node:vm'
 
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
 const directory = await mkdtemp(join(tmpdir(), 'dsh-im-host-'))
@@ -74,7 +75,33 @@ try {
   assert.equal(index.status, 200)
   const html = await index.text()
   assert.ok(html.includes('dsh-im-qq-wechat'), 'Plugin missing from browser boot roster')
-  const request = (method, payload = {}, requestHeaders = headers) => fetch(`${launch.origin}/api/qqbot/${method}`, { method: 'POST', headers: requestHeaders, body: JSON.stringify({ type: 'client-request', rpcId: 'smoke-1', method, payload }) })
+  const request = (method, payload = {}, requestHeaders = headers) => fetch(`${launch.origin}/api/qqbot/${method}`, { method: 'POST', headers: requestHeaders, body: JSON.stringify({ type: 'client-request', rpcId: 'smoke-1', method: `qqbot/${method}`, payload }) })
+  const registrations = []
+  vm.runInNewContext(await readFile(join(installedRoot, 'lib/client.js'), 'utf8'), {
+    window: { __ModuleLoader__: { load: registration => registrations.push(registration) } },
+  })
+  let controller
+  const client = registrations[0]?.factory(name => {
+    assert.equal(name, 'react')
+    return {}
+  })
+  client.apply({
+    connection: { rpc: { async call(channel, endpoint, payload) {
+      assert.equal(channel, '/api', 'Browser RPC must use Harness shared channel')
+      const response = await fetch(new URL(`${channel}/${endpoint}`, launch.origin), {
+        method: 'POST', headers, body: JSON.stringify({ type: 'client-request', rpcId: 'bundle-smoke', method: endpoint, payload }),
+      })
+      assert.equal(response.status, 200)
+      return (await response.json()).result
+    } } },
+    slots: {
+      inject(_name, register) { register() },
+      register(options) { controller = options.inject().controller },
+    },
+  })
+  assert.ok(controller, 'Settings panel did not expose its controller')
+  const browserStatus = await controller.status()
+  assert.equal(browserStatus.ok, true, JSON.stringify(browserStatus))
   const unauthenticated = await request('status', {}, { 'content-type': 'application/json' })
   assert.equal(unauthenticated.status, 401)
   const response = await request('status')
@@ -90,7 +117,7 @@ try {
     if (output.includes('agent_contract_failed:') || Date.now() > deadline) throw new Error('Agent probe failed: ' + output.replace(/([?&]token=)[^\s&)]+/g, '$1[redacted]'))
     await new Promise(resolve => setTimeout(resolve, 100))
   }
-  console.log('host_verified: Harness 0.1.5-rc.2 boots installed archive; browser roster, authenticated status, five idle channels, unauthorized requests rejected')
+  console.log('host_verified: Harness 0.1.5-rc.2 boots installed archive; bundled settings RPC, authenticated status, five idle channels, unauthorized requests rejected')
 } finally {
   if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
   else child.kill('SIGTERM')

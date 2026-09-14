@@ -13,7 +13,7 @@ export function installImRpc(
     async fetch(request) {
       if (request.headers.get('content-type')?.split(';')[0]?.trim() !== 'application/json') return new Response('JSON required', { status: 415 })
       const message = clientRequestSchema.safeParse(await request.json().catch(() => undefined))
-      if (!message.success || message.data.method !== endpoint) return new Response('Invalid RPC envelope', { status: 400 })
+      if (!message.success || message.data.method !== `qqbot/${endpoint}`) return new Response('Invalid RPC envelope', { status: 400 })
       return Response.json({ type: 'server-response', rpcId: message.data.rpcId, result: await dispatch(endpoint, message.data.payload) })
     },
   }))

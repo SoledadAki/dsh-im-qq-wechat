@@ -15,14 +15,14 @@ window.__ModuleLoader__!.load({
     const React = require('react')
     const { useState, useEffect, useCallback } = React
     const controllerOf = (rpc: Rpc) => ({
-      status: () => rpc.call('/api/qqbot', 'status', {}),
-      begin: (channel: string) => rpc.call('/api/qqbot', 'begin', { channel }),
-      cancel: (channel: string) => rpc.call('/api/qqbot', 'cancel', { channel }),
-      verify: (channel: string, code: string) => rpc.call('/api/qqbot', 'verify', { channel, code }),
-      configure: (channel: string, values: Record<string, string>) => rpc.call('/api/qqbot', 'configure', { channel, values }),
-      unbind: (channel: string) => rpc.call('/api/qqbot', 'unbind', { channel }),
-      disconnect: (channel: string) => rpc.call('/api/qqbot', 'disconnect', { channel }),
-      connect: (channel: string) => rpc.call('/api/qqbot', 'connect', { channel }),
+      status: () => rpc.call('/api', 'qqbot/status', {}),
+      begin: (channel: string) => rpc.call('/api', 'qqbot/begin', { channel }),
+      cancel: (channel: string) => rpc.call('/api', 'qqbot/cancel', { channel }),
+      verify: (channel: string, code: string) => rpc.call('/api', 'qqbot/verify', { channel, code }),
+      configure: (channel: string, values: Record<string, string>) => rpc.call('/api', 'qqbot/configure', { channel, values }),
+      unbind: (channel: string) => rpc.call('/api', 'qqbot/unbind', { channel }),
+      disconnect: (channel: string) => rpc.call('/api', 'qqbot/disconnect', { channel }),
+      connect: (channel: string) => rpc.call('/api', 'qqbot/connect', { channel }),
     })
     const errorText = (error: unknown) => error instanceof Error ? error.message : '连接失败，请确认 Harness 正在运行后重试'
     type Controller = ReturnType<typeof controllerOf>

@@ -1,6 +1,6 @@
 {
   "name": "dsh-im-qq-wechat",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "DeepSeek Harness Host plugin for QQ, WeChat, WeCom, Feishu and Telegram with persistent Agent sessions.",
   "license": "MIT",
   "type": "module",

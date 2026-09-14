@@ -6,10 +6,10 @@
 
 环境：**DeepSeek Harness Web 0.1.5-rc.2**、Node.js 22+，并已在 Harness 中配置好模型。
 
-从 [GitHub Releases](https://github.com/SoledadAki/dsh-im-qq-wechat/releases) 下载 `dsh-im-qq-wechat-0.5.0.tgz`，在下载目录执行：
+从 [GitHub Releases](https://github.com/SoledadAki/dsh-im-qq-wechat/releases) 下载 `dsh-im-qq-wechat-0.5.1.tgz`，在下载目录执行：
 
 ```sh
-dsh plugin --profile web add ./dsh-im-qq-wechat-0.5.0.tgz
+dsh plugin --profile web add ./dsh-im-qq-wechat-0.5.1.tgz
 dsh --profile web
 ```
 
@@ -51,7 +51,7 @@ dsh --profile web
 
 ## 升级与卸载
 
-升级时安装新版 `.tgz` 并重启 Harness。绑定关系和会话存放在 Harness settings / credentials 中，0.5.0 沿用原有存储格式，覆盖安装即可。
+升级时安装新版 `.tgz` 并重启 Harness。绑定关系和会话存放在 Harness settings / credentials 中，0.5.1 沿用原有存储格式，覆盖安装即可。
 
 ```sh
 dsh plugin --profile web remove dsh-im-qq-wechat
@@ -62,7 +62,8 @@ dsh plugin --profile web remove dsh-im-qq-wechat
 - 设置页没有插件入口：确认安装的是本插件 `.tgz`，重启 Harness，并核对 Harness 版本为 0.1.5-rc.2。
 - 已连接但不响应：检查绑定用户与群聊的 @ / 回复条件，先用绑定账号私聊测试。
 - Telegram 持续重连：检查网络、Token、已有 Webhook 和重复运行的机器人实例。
-- 长回复被截断或分段异常：确认插件版本为 0.5.0。
+- 设置页提示 `invalid RPC target`：安装 0.5.1 或更新版本，并重启 Harness、刷新浏览器页面。
+- 长回复被截断或分段异常：确认插件版本至少为 0.5.0。
 
 更多资料见 [运维指南](./docs/OPERATIONS.md)、[安全说明](./SECURITY.md) 和 [更新记录](./CHANGELOG.md)。配对码和机器人密钥请自行保管，不要公开分享。
 
