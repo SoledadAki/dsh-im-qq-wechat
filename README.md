@@ -4,16 +4,20 @@
 
 ## 安装
 
-环境：**DeepSeek Harness Web 0.1.5-rc.2**、Node.js 22+，并已在 Harness 中配置好模型。
+适用环境：**DeepSeek Harness 0.1.5-rc.2 的 Web profile**、Node.js 22+。请先在 Harness 中配置可用模型。
 
-从 [GitHub Releases](https://github.com/SoledadAki/dsh-im-qq-wechat/releases) 下载 `dsh-im-qq-wechat-0.5.1.tgz`，在下载目录执行：
+1. 从 [GitHub Release 下载 dsh-im-qq-wechat-0.5.1.tgz](https://github.com/SoledadAki/dsh-im-qq-wechat/releases/download/v0.5.1/dsh-im-qq-wechat-0.5.1.tgz)。**保留 `.tgz` 原文件，不要解压，也不要下载仓库的 “Source code (zip)” 当作安装包。**
+2. 在运行 Harness 的同一个环境中打开终端，安装到你实际使用的 profile。默认 Web profile 为 `web`：
 
 ```sh
-dsh plugin --profile web add ./dsh-im-qq-wechat-0.5.1.tgz
+dsh plugin --profile web add /path/to/dsh-im-qq-wechat-0.5.1.tgz
+dsh --profile web --dump-config
 dsh --profile web
 ```
 
-首次安装会联网拉取运行依赖，之后无需再跑 `pnpm install` 或构建。
+把 `/path/to/` 换成下载文件所在目录；Windows PowerShell 示例：`dsh plugin --profile web add "E:\Download\dsh-im-qq-wechat-0.5.1.tgz"`。如果 Harness 运行在 WSL 中，请在 WSL 终端安装，Windows 的 `E:\Download` 对应 `/mnt/e/Download`。`--dump-config` 输出中出现 `qq-weixin`，表示插件配置层已加入 profile。安装或升级后重启 Harness，并刷新浏览器页面。
+
+首次安装会联网拉取运行依赖，之后无需手动运行 `pnpm install` 或构建。解压后看见的 `package/` 是 npm 安装包的标准内部目录：`lib/`、`sidecar/` 和 `cordis.patch.yml` 是运行内容；`README.md`、`LICENSE` 和 `THIRD_PARTY_NOTICES.md` 是随包文档。
 
 ## 首次使用
 
@@ -65,7 +69,7 @@ dsh plugin --profile web remove dsh-im-qq-wechat
 - 设置页提示 `invalid RPC target`：安装 0.5.1 或更新版本，并重启 Harness、刷新浏览器页面。
 - 长回复被截断或分段异常：确认插件版本至少为 0.5.0。
 
-更多资料见 [运维指南](./docs/OPERATIONS.md)、[安全说明](./SECURITY.md) 和 [更新记录](./CHANGELOG.md)。配对码和机器人密钥请自行保管，不要公开分享。
+更多资料见 [运维指南](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/docs/OPERATIONS.md)、[安全说明](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/SECURITY.md) 和 [更新记录](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/CHANGELOG.md)。配对码和机器人密钥请自行保管，不要公开分享。
 
 ## 开发者
 
@@ -76,6 +80,6 @@ pnpm install --frozen-lockfile
 pnpm run release:check
 ```
 
-`release:check` 依次执行类型检查、测试、构建，并在独立目录中安装生成的包、启动真实 Harness 0.1.5-rc.2，验证浏览器模块、认证接口与 Agent 生命周期；安装包输出到 `dist/`。发布流程见 [CONTRIBUTING.md](./CONTRIBUTING.md)，真实通道验收见 [运维指南](./docs/OPERATIONS.md)。
+`release:check` 依次执行类型检查、测试、构建，并在独立目录中安装生成的包、启动真实 Harness 0.1.5-rc.2，验证浏览器模块、认证接口与 Agent 生命周期；安装包输出到 `dist/`。发布流程见 [CONTRIBUTING.md](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/CONTRIBUTING.md)，真实通道验收见 [运维指南](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/docs/OPERATIONS.md)。
 
 MIT。第三方来源见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
