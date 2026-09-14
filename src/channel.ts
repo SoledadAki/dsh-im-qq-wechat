@@ -99,3 +99,16 @@ export interface ChannelAdapter {
 export function bindingKeyFor(channel: ChannelKind, userId: string, sharedSession: boolean): string {
   return sharedSession ? 'shared' : `${channel}:${userId}`
 }
+
+/** Typing indicators are optional and must never prevent an inbound turn. */
+export async function sendTypingBestEffort(
+  adapter: Pick<ChannelAdapter, 'sendTyping'>,
+  userId: string,
+  replyToId: string,
+): Promise<void> {
+  try {
+    await adapter.sendTyping?.(userId, replyToId)
+  } catch {
+    // The reply itself can still proceed when a platform rejects typing.
+  }
+}

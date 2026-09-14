@@ -12,7 +12,7 @@ import { APPROVAL_POLICIES } from '@deepseek-ai/dsh-user-approval'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
 import type { ChannelAdapter, ChannelKind, ChannelReplyStream, ChannelStatus } from './channel.js'
-import { bindingKeyFor } from './channel.js'
+import { bindingKeyFor, sendTypingBestEffort } from './channel.js'
 import type {
   AgentHandleLike,
   AgentLike,
@@ -829,7 +829,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         userId,
         msgId: message.id,
       })
-      await adapter.sendTyping?.(userId, extId).catch(() => undefined)
+      await sendTypingBestEffort(adapter, userId, extId)
       if (adapter.openReplyStream !== undefined) {
         tracked.stream = await adapter.openReplyStream(userId, extId).catch((error) => {
           logger.warn(`[qq-weixin] ${adapter.kind} native stream unavailable: ${String(error)}`)
