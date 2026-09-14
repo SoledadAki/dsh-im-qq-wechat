@@ -214,7 +214,10 @@ export class InboundTracker {
   dropSession(sessionId: string): void {
     this.attempts.delete(sessionId)
     for (const [extId, tracked] of this.byExtId) {
-      if (tracked.sessionId === sessionId) { void tracked.stream?.cancel(); this.byExtId.delete(extId) }
+      if (tracked.sessionId === sessionId) {
+        void Promise.resolve().then(() => tracked.stream?.cancel()).catch(() => undefined)
+        this.byExtId.delete(extId)
+      }
     }
     for (const key of this.callTurns.keys()) if (key.startsWith(`${sessionId}:`)) this.callTurns.delete(key)
   }
@@ -234,7 +237,9 @@ export class InboundTracker {
   }
 
   clear(): void {
-    for (const tracked of this.byExtId.values()) void tracked.stream?.cancel()
+    for (const tracked of this.byExtId.values()) {
+      void Promise.resolve().then(() => tracked.stream?.cancel()).catch(() => undefined)
+    }
     this.byExtId.clear()
     this.callTurns.clear()
     this.attempts.clear()

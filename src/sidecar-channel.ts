@@ -86,6 +86,7 @@ export class SidecarChannelAdapter implements ChannelAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private reconnectAttempts = 0
   private intentionalStop = false
+  private nativeStreamAvailable = true
 
   constructor(private readonly options: SidecarChannelOptions) {
     this.kind = options.kind
@@ -185,26 +186,67 @@ export class SidecarChannelAdapter implements ChannelAdapter {
   }
 
   async openReplyStream(userId: string, replyToId: string): Promise<ChannelReplyStream | undefined> {
-    if (this.kind !== 'qq') return undefined
+    if (this.kind !== 'qq' || !this.nativeStreamAvailable) return undefined
     const binding = this.requireOwner(userId)
     const streamId = randomUUID()
     const request = async (type: string, extra: Record<string, unknown> = {}): Promise<void> => {
       const frame = await this.client.request(type, { account_id: binding.accountId, stream_id: streamId, ...extra }, ['stream.ok', 'stream.failed'])
       if (frame.type === 'stream.failed') throw new Error('QQ native stream failed')
     }
-    const sendRemainder = (text: string) => this.sendText(userId, text)
-    await request('stream.start', { target_id: userId, reply_to_id: replyToId })
+    const disableNativeStream = (error: unknown): void => {
+      this.nativeStreamAvailable = false
+      this.options.logger.warn(`[qq] native stream disabled for this process: ${String(error)}`)
+    }
+    try {
+      await request('stream.start', { target_id: userId, reply_to_id: replyToId })
+    } catch (error) {
+      disableNativeStream(error)
+      throw error
+    }
     let closed = false
+    let failed = false
+    let pending: Promise<void> = Promise.resolve()
+    const sendFallback = (text: string) => this.sendText(userId, text, replyToId)
+    const sendRemainder = (text: string) => this.sendText(userId, text)
     return {
-      async update(text) { if (!closed && text.trim()) await request('stream.update', { text }) },
+      update(text) {
+        if (closed || failed || !text.trim()) return pending
+        pending = pending.then(async () => {
+          if (failed) return
+          try {
+            await request('stream.update', { text })
+          } catch (error) {
+            failed = true
+            disableNativeStream(error)
+            void request('stream.cancel').catch(() => undefined)
+          }
+        })
+        return pending
+      },
       async finish(text) {
         if (closed) return
         closed = true
+        await pending
+        if (failed) {
+          await sendFallback(text)
+          return
+        }
         const chunks = splitMessageText(text, 5000)
-        await request('stream.finish', { text: chunks[0] ?? '处理完成。' })
+        try {
+          await request('stream.finish', { text: chunks[0] ?? '处理完成。' })
+        } catch (error) {
+          disableNativeStream(error)
+          await sendFallback(text)
+          return
+        }
         for (const chunk of chunks.slice(1)) await sendRemainder(chunk)
       },
-      async cancel() { if (closed) return; closed = true; await request('stream.cancel') },
+      async cancel() {
+        if (closed) return
+        closed = true
+        await pending
+        await request('stream.cancel').catch(() => undefined)
+      },
     }
   }
 

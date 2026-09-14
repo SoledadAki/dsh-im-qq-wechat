@@ -148,6 +148,11 @@ const err = (code: string, message: string, details?: Record<string, unknown>): 
 /* -------------------------------------------------------------------------- */
 export function apply(ctx: HostCtx, config: PluginConfig): void {
   const logger = ctx.logger
+  const deliver = (task: () => void | Promise<void>, label: string): void => {
+    void Promise.resolve().then(task).catch((error) => {
+      logger.warn(`[qq-weixin] ${label} failed: ${String(error)}`)
+    })
+  }
 
   if (!APPROVAL_POLICIES.includes(config.approvalPolicy)) {
     throw new Error(`qq-weixin: invalid approvalPolicy ${JSON.stringify(config.approvalPolicy)}`)
@@ -841,13 +846,13 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         tracked.timeout = ctx.timeout(() => {
           if (tracked.done) return
           tracker.remove(extId)
-          void tracked.stream?.cancel()
-          void adapter.sendText(userId, `⏱️ 超时（${config.replyTimeoutMs}ms），任务已放弃`)
+          if (tracked.stream) deliver(() => tracked.stream!.cancel(), 'timeout stream cancel')
+          deliver(() => adapter.sendText(userId, `⏱️ 超时（${config.replyTimeoutMs}ms），任务已放弃`), 'timeout reply')
         }, config.replyTimeoutMs)
       }
     } catch (error) {
       logger.warn(`[qq-weixin] inbound handling failed: ${String(error)}`)
-      void adapter.sendText(userId, '⚠️ 处理失败，请稍后再试')
+      deliver(() => adapter.sendText(userId, '⚠️ 处理失败，请稍后再试'), 'inbound error reply')
     }
   }
 
@@ -874,7 +879,9 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
   })
   ctx.on('agent/assistant-stream', ({ agent, frame }: { agent: AgentLike; frame: import('@deepseek-ai/dsh-agent').AssistantStreamFrame }) => {
     for (const tracked of tracker.onAssistantStream(agent.id, frame)) {
-      void Promise.resolve(tracked.stream?.update(tracked.streamText)).catch((error) => logger.warn('IM stream update failed', error))
+      const stream = tracked.stream
+      const value = tracked.streamText
+      if (stream) deliver(() => stream.update(value), 'stream update')
     }
   })
   ctx.on('session/event', (session: any, event: SessionEventLike) => {
@@ -883,7 +890,10 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         .filter((block) => block.type === 'text')
         .map((block) => block.text ?? '')
         .join('')
-      if (text) for (const tracked of tracker.setAssistantText(session.id, event.data.turn, text)) void tracked.stream?.update(text)
+      if (text) for (const tracked of tracker.setAssistantText(session.id, event.data.turn, text)) {
+        const stream = tracked.stream
+        if (stream) deliver(() => stream.update(text), 'assistant message update')
+      }
     }
     if (event.type === 'tool/call' && event.data?.turn !== undefined) {
       const callId = (event.data as { callId?: unknown }).callId
@@ -891,7 +901,9 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       const data = event.data as { name?: unknown; toolName?: unknown }
       const toolName = String(data.name ?? data.toolName ?? '工具')
       for (const tracked of tracker.activeForTurn(session.id, event.data.turn)) {
-        void tracked.stream?.update(`${tracked.streamText}${tracked.streamText ? '\n\n' : ''}_正在使用 ${toolName}…_`)
+        const stream = tracked.stream
+        const value = `${tracked.streamText}${tracked.streamText ? '\n\n' : ''}_正在使用 ${toolName}…_`
+        if (stream) deliver(() => stream.update(value), 'tool call update')
       }
     }
     if (event.type === 'turn/end' && event.data?.turn !== undefined) {
@@ -903,8 +915,9 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         const adapter = adapters.get(tracked.channel)
         if (adapter !== undefined) {
           const payload = tracked.replyText !== '' ? tracked.replyText : describeTurnReason(tracked.reason)
-          if (tracked.stream) void tracked.stream.finish(payload).catch(() => adapter.sendText(tracked.userId, payload, tracked.extId))
-          else void adapter.sendText(tracked.userId, payload, tracked.extId)
+          const stream = tracked.stream
+          if (stream) deliver(() => stream.finish(payload), 'stream final reply')
+          else deliver(() => adapter.sendText(tracked.userId, payload, tracked.extId), 'final reply')
         }
       }
     }
@@ -916,8 +929,9 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       tracked.timeout?.()
       const adapter = adapters.get(tracked.channel)
       if (adapter !== undefined) {
-        void tracked.stream?.cancel()
-        void adapter.sendText(tracked.userId, `⚠️ 回合 ${turn} 出错：${error?.message ?? String(error)}`)
+        const stream = tracked.stream
+        if (stream) deliver(() => stream.cancel(), 'failed stream cancel')
+        deliver(() => adapter.sendText(tracked.userId, `⚠️ 回合 ${turn} 出错：${error?.message ?? String(error)}`), 'agent error reply')
       }
     }
   })

@@ -39,3 +39,46 @@ for (const kind of ['qq', 'wechat'] as const) {
     await assert.rejects(adapter.sendText('stranger', 'no'), /owner/)
   })
 }
+
+test('QQ native stream failure falls back to a normal final reply and disables streaming', async () => {
+  const warnings: string[] = []
+  const adapter = new SidecarChannelAdapter({ kind: 'qq', profileId: 'test', stateDir: '.', secretRef: 'test',
+    credentials: { async resolve() { return undefined }, async set() {}, async unset() {} },
+    persistence: { load: () => ({ accountId: 'bot', ownerUserId: 'owner' }), async save() {}, async clear() {} },
+    logger: { info() {}, warn(message) { warnings.push(message) }, error() {} },
+  })
+  const sent: Array<{ text: string; replyToId: string }> = []
+  ;(adapter as any).client.request = async (type: string, payload: any) => {
+    if (type === 'stream.update') return { type: 'stream.failed' }
+    if (type === 'message.send') {
+      sent.push({ text: payload.text, replyToId: payload.reply_to_id })
+      return { type: 'message.sent' }
+    }
+    return { type: 'stream.ok' }
+  }
+  const stream = await adapter.openReplyStream('owner', 'incoming')
+  assert.ok(stream)
+  await assert.doesNotReject(stream.update('partial answer'))
+  await stream.finish('complete answer')
+  assert.deepEqual(sent, [{ text: 'complete answer', replyToId: 'incoming' }])
+  assert.equal(await adapter.openReplyStream('owner', 'next'), undefined)
+  assert.equal(warnings.length, 1)
+})
+
+test('QQ failed stream finish also sends the final answer as a normal reply', async () => {
+  const adapter = new SidecarChannelAdapter({ kind: 'qq', profileId: 'test', stateDir: '.', secretRef: 'test',
+    credentials: { async resolve() { return undefined }, async set() {}, async unset() {} },
+    persistence: { load: () => ({ accountId: 'bot', ownerUserId: 'owner' }), async save() {}, async clear() {} },
+    logger: { info() {}, warn() {}, error() {} },
+  })
+  const sent: string[] = []
+  ;(adapter as any).client.request = async (type: string, payload: any) => {
+    if (type === 'stream.finish') return { type: 'stream.failed' }
+    if (type === 'message.send') { sent.push(payload.text); return { type: 'message.sent' } }
+    return { type: 'stream.ok' }
+  }
+  const stream = await adapter.openReplyStream('owner', 'incoming')
+  assert.ok(stream)
+  await stream.finish('complete answer')
+  assert.deepEqual(sent, ['complete answer'])
+})
