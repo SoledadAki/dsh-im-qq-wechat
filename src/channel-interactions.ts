@@ -52,13 +52,20 @@ export class ChannelInteractions {
     const approval = /^\/(approve|reject|同意|拒绝)\s+([a-f0-9]{8})$/i.exec(text.trim())
     if (approval) {
       const value = approval[1]!.toLowerCase()
-      this.finishApproval(approval[2]!.toLowerCase(), value === 'approve' || value === '同意' ? 'allowed-once' : 'rejected')
+      const id = approval[2]!.toLowerCase()
+      // Consume only a decision that addressed a live approval.  An unknown or
+      // stale id used to be swallowed silently, so the command vanished with no
+      // reply and never reached the agent either.
+      if (this.pending.get(id)?.kind !== 'approval') return false
+      this.finishApproval(id, value === 'approve' || value === '同意' ? 'allowed-once' : 'rejected')
       return true
     }
     const answer = /^\/answer\s+([a-f0-9]{8})\s+([\s\S]+)$/i.exec(text.trim())
     if (!answer) return false
     const pending = this.pending.get(answer[1]!.toLowerCase())
-    if (pending?.kind !== 'question') return true
+    // Same reasoning: `/answer` for an id that is not a live question is not a
+    // decision, so let the text through instead of dropping it.
+    if (pending?.kind !== 'question') return false
     const values = answer[2]!.split('|').map((item) => item.trim())
     if (values.length !== pending.count || values.some((item) => !item)) return true
     this.remove(answer[1]!.toLowerCase())

@@ -11,7 +11,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { APPROVAL_POLICIES } from '@deepseek-ai/dsh-user-approval'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
-import type { ChannelAdapter, ChannelKind, ChannelReplyStream, ChannelStatus } from './channel.js'
+import type { ApprovalPrompt, BridgeQuestion, ChannelAdapter, ChannelKind, ChannelReplyStream, ChannelStatus } from './channel.js'
 import { bindingKeyFor, sendTypingBestEffort } from './channel.js'
 import type {
   AgentHandleLike,
@@ -57,7 +57,7 @@ export const Config = z.object({
   stateDir: z.string().default(''),
   sourceKind: z.union(['user', 'qq', 'wechat', 'wecom', 'feishu', 'telegram']).default('user'),
   approvalPolicy: z.union(['ask', 'never']).default('ask'),
-  replyTimeoutMs: z.number().min(0).default(0),
+  replyTimeoutMs: z.number().min(0).max(2_147_483_647).default(0),
   redactWorkspacePaths: z.boolean().default(true),
 })
 
@@ -98,6 +98,11 @@ interface HostCtx {
     register(namespace: string, schema: unknown): {
       get(): unknown
       update(patch: unknown): Promise<void>
+      /**
+       * Replace the whole namespace section.  `update` deep-merges, so it can
+       * only add or overwrite keys — revoking anything requires this.
+       */
+      replace(section: unknown): Promise<void>
     }
   }
   credentials: {
@@ -194,11 +199,49 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
   const settingsReady = readSettings().then((settings) => {
     settingsCache = settings
   })
-  async function persistBinding(key: string, sessionId: string): Promise<void> {
-    const { bindings } = await readSettings()
-    bindings[key] = sessionId
-    settingsCache.bindings[key] = sessionId
-    await settingsScope.update({ bindings })
+  /**
+   * Serialize every settings read-modify-write this plugin performs.
+   *
+   * `update` merges its patch over the section committed when the write reaches
+   * the queue front, while `replace` writes the caller's snapshot verbatim.  A
+   * `replace` built from a snapshot read while another flow's `update` was still
+   * in flight therefore silently dropped that flow's binding/session, and an
+   * `update` built from a pre-replace snapshot could resurrect a key another flow
+   * had just revoked.  The settings scope exposes no revision to this plugin, so
+   * the read-modify-write has to be serialized here.
+   */
+  let settingsWrites: Promise<unknown> = Promise.resolve()
+  function withSettingsLock<T>(work: () => Promise<T>): Promise<T> {
+    const run = settingsWrites.then(work, work)
+    settingsWrites = run.then(() => undefined, () => undefined)
+    return run
+  }
+  /**
+   * Persist the entire namespace section, dropping whatever was removed locally.
+   *
+   * `settingsScope.update()` deep-merges the patch (`dsh-settings` mergeLayers:
+   * keys present in the stored layer but absent from the patch are retained, so
+   * "a sparse patch cannot erase lower keys").  Every deletion in this file used
+   * to be a `delete` on a local copy followed by `update`, i.e. a silent no-op:
+   * 解绑 unset the credential but left `channels[kind]` — including the owner id —
+   * on disk, and a later re-configure of the same bot restored that owner with
+   * no pairing step.  `replace` is the only verb that can actually revoke.
+   *
+   * Callers must already hold {@link withSettingsLock}.
+   */
+  async function replaceSettings(next: SettingsDoc): Promise<void> {
+    await settingsScope.replace(next)
+    // Only publish the cache once the write landed; on failure the previous
+    // cache still describes what is on disk.
+    settingsCache = next
+  }
+  function persistBinding(key: string, sessionId: string): Promise<void> {
+    return withSettingsLock(async () => {
+      const { bindings } = await readSettings()
+      bindings[key] = sessionId
+      settingsCache.bindings[key] = sessionId
+      await settingsScope.update({ bindings })
+    })
   }
   function sessionHistory(key: string): string[] {
     try {
@@ -216,53 +259,60 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       return undefined
     }
   }
-  async function recordSession(key: string, id: string, cwd: string, name?: string): Promise<void> {
-    const current = await readSettings()
-    const now = Date.now()
-    const old = sessionMeta(id)
-    const meta: ManagedSession = {
-      id,
-      name: name?.trim() || old?.name || `会话 ${new Date(now).toLocaleString('zh-CN')}`,
-      cwd: cwd || old?.cwd || config.cwd || process.cwd(),
-      createdAt: old?.createdAt ?? now,
-      lastUsedAt: now,
-    }
-    const history = sessionHistory(key).filter((item) => item !== id)
-    history.unshift(id)
-    current.sessions[id] = JSON.stringify(meta)
-    current.histories[key] = JSON.stringify(history.slice(0, 30))
-    settingsCache.sessions[id] = current.sessions[id]!
-    settingsCache.histories[key] = current.histories[key]!
-    await settingsScope.update({ sessions: current.sessions, histories: current.histories })
+  function recordSession(key: string, id: string, cwd: string, name?: string): Promise<void> {
+    return withSettingsLock(async () => {
+      const current = await readSettings()
+      const now = Date.now()
+      const old = sessionMeta(id)
+      const meta: ManagedSession = {
+        id,
+        name: name?.trim() || old?.name || `会话 ${new Date(now).toLocaleString('zh-CN')}`,
+        cwd: cwd || old?.cwd || config.cwd || process.cwd(),
+        createdAt: old?.createdAt ?? now,
+        lastUsedAt: now,
+      }
+      const history = sessionHistory(key).filter((item) => item !== id)
+      history.unshift(id)
+      current.sessions[id] = JSON.stringify(meta)
+      current.histories[key] = JSON.stringify(history.slice(0, 30))
+      settingsCache.sessions[id] = current.sessions[id]!
+      settingsCache.histories[key] = current.histories[key]!
+      await settingsScope.update({ sessions: current.sessions, histories: current.histories })
+    })
   }
-  async function replaceSessionRecord(key: string, oldId: string | undefined, newId: string, cwd: string, name: string): Promise<void> {
-    const current = await readSettings()
-    const now = Date.now()
-    if (oldId !== undefined) {
-      delete current.sessions[oldId]
-      delete current.efforts[oldId]
-      delete current.models[oldId]
-      delete settingsCache.sessions[oldId]
-      delete settingsCache.efforts[oldId]
-      delete settingsCache.models[oldId]
-    }
-    const meta: ManagedSession = { id: newId, name, cwd, createdAt: now, lastUsedAt: now }
-    current.sessions[newId] = JSON.stringify(meta)
-    current.histories[key] = JSON.stringify([newId, ...sessionHistory(key).filter((id) => id !== oldId && id !== newId)].slice(0, 30))
-    settingsCache.sessions[newId] = current.sessions[newId]!
-    settingsCache.histories[key] = current.histories[key]!
-    await settingsScope.update({ sessions: current.sessions, histories: current.histories, efforts: current.efforts, models: current.models })
+  function replaceSessionRecord(key: string, oldId: string | undefined, newId: string, cwd: string, name: string): Promise<void> {
+    return withSettingsLock(async () => {
+      const current = await readSettings()
+      const now = Date.now()
+      if (oldId !== undefined) {
+        delete current.sessions[oldId]
+        delete current.efforts[oldId]
+        delete current.models[oldId]
+        delete settingsCache.sessions[oldId]
+        delete settingsCache.efforts[oldId]
+        delete settingsCache.models[oldId]
+      }
+      const meta: ManagedSession = { id: newId, name, cwd, createdAt: now, lastUsedAt: now }
+      current.sessions[newId] = JSON.stringify(meta)
+      current.histories[key] = JSON.stringify([newId, ...sessionHistory(key).filter((id) => id !== oldId && id !== newId)].slice(0, 30))
+      settingsCache.sessions[newId] = current.sessions[newId]!
+      settingsCache.histories[key] = current.histories[key]!
+      // `sessions`/`efforts`/`models` lost keys above: a merge-based update would
+      // keep the retired session records (and their model/effort overrides) alive.
+      await replaceSettings(current)
+    })
   }
-  async function removeBinding(channel: ChannelKind, userId: string | undefined): Promise<void> {
-    if (config.sharedSession) return
-    if (userId === undefined) return
+  function removeBinding(channel: ChannelKind, userId: string | undefined): Promise<void> {
+    if (config.sharedSession) return Promise.resolve()
+    if (userId === undefined) return Promise.resolve()
     const key = bindingKeyFor(channel, userId, false)
-    const { bindings } = await readSettings()
-    if (bindings[key] !== undefined) {
-      delete bindings[key]
-      delete settingsCache.bindings[key]
-      await settingsScope.update({ bindings })
-    }
+    return withSettingsLock(async () => {
+      const current = await readSettings()
+      if (current.bindings[key] !== undefined) {
+        delete current.bindings[key]
+        await replaceSettings(current)
+      }
+    })
   }
 
   function channelPersistence(kind: ChannelKind) {
@@ -277,17 +327,23 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
           return undefined
         }
       },
-      async save(binding: PersistedChannelBinding): Promise<void> {
-        const { channels } = await readSettings()
-        channels[kind] = JSON.stringify(binding)
-        settingsCache.channels[kind] = channels[kind]!
-        await settingsScope.update({ channels })
+      save(binding: PersistedChannelBinding): Promise<void> {
+        return withSettingsLock(async () => {
+          const { channels } = await readSettings()
+          channels[kind] = JSON.stringify(binding)
+          settingsCache.channels[kind] = channels[kind]!
+          await settingsScope.update({ channels })
+        })
       },
-      async clear(): Promise<void> {
-        const { channels } = await readSettings()
-        delete channels[kind]
-        delete settingsCache.channels[kind]
-        await settingsScope.update({ channels })
+      clear(): Promise<void> {
+        return withSettingsLock(async () => {
+          const current = await readSettings()
+          delete current.channels[kind]
+          // Must be `replace`: a merge-update would resurrect the deleted record,
+          // so 解绑 left {accountId, ownerUserId} on disk and re-configuring the
+          // same bot brought the previous owner back without any pairing.
+          await replaceSettings(current)
+        })
       },
     }
   }
@@ -393,6 +449,8 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
   function protectExternalAdapter(adapter: ChannelAdapter): ChannelAdapter {
     const sendText = adapter.sendText.bind(adapter)
     const openReplyStream = adapter.openReplyStream?.bind(adapter)
+    const askApproval = adapter.askApproval.bind(adapter)
+    const askQuestion = adapter.askQuestion.bind(adapter)
     return new Proxy(adapter, {
       get(target, property, receiver) {
         if (property === 'sendText') {
@@ -411,6 +469,24 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
             }
           }
         }
+        if (property === 'askApproval') {
+          // Approval and question prompts are built by ChannelInteractions, which
+          // sends through the adapter's own sendText and therefore bypassed this
+          // proxy — an approval reason could carry a raw absolute path out to the
+          // chat platform even with redactWorkspacePaths enabled.
+          return (userId: string, prompt: ApprovalPrompt, signal?: AbortSignal) =>
+            askApproval(userId, prompt.reason === undefined
+              ? prompt
+              : { ...prompt, reason: redactExternalText(prompt.reason) }, signal)
+        }
+        if (property === 'askQuestion') {
+          return (userId: string, questions: ReadonlyArray<BridgeQuestion>, signal?: AbortSignal) =>
+            askQuestion(userId, questions.map((question) => ({
+              ...question,
+              question: redactExternalText(question.question),
+              ...(question.detail === undefined ? {} : { detail: redactExternalText(question.detail) }),
+            })), signal)
+        }
         const value = Reflect.get(target, property, receiver)
         return typeof value === 'function' ? value.bind(target) : value
       },
@@ -419,18 +495,22 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
 
   for (const [kind, adapter] of adapters) adapters.set(kind, protectExternalAdapter(adapter))
 
-  async function setWorkspace(key: string, cwd: string): Promise<void> {
-    const { workspaces } = await readSettings()
-    workspaces[key] = cwd
-    settingsCache.workspaces[key] = cwd
-    await settingsScope.update({ workspaces })
+  function setWorkspace(key: string, cwd: string): Promise<void> {
+    return withSettingsLock(async () => {
+      const { workspaces } = await readSettings()
+      workspaces[key] = cwd
+      settingsCache.workspaces[key] = cwd
+      await settingsScope.update({ workspaces })
+    })
   }
 
-  async function setEffort(sessionId: string, effort: string): Promise<void> {
-    const { efforts } = await readSettings()
-    efforts[sessionId] = effort
-    settingsCache.efforts[sessionId] = effort
-    await settingsScope.update({ efforts })
+  function setEffort(sessionId: string, effort: string): Promise<void> {
+    return withSettingsLock(async () => {
+      const { efforts } = await readSettings()
+      efforts[sessionId] = effort
+      settingsCache.efforts[sessionId] = effort
+      await settingsScope.update({ efforts })
+    })
   }
 
   interface SessionModelSelection { provider: string; model: string }
@@ -451,11 +531,13 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
     if (agent.options?.provider && agent.options.model) return { provider: agent.options.provider, model: agent.options.model }
     return defaultModel?.currentSelection()
   }
-  async function setSessionModel(sessionId: string, selection: SessionModelSelection): Promise<void> {
-    const { models } = await readSettings()
-    models[sessionId] = JSON.stringify(selection)
-    settingsCache.models[sessionId] = models[sessionId]!
-    await settingsScope.update({ models })
+  function setSessionModel(sessionId: string, selection: SessionModelSelection): Promise<void> {
+    return withSettingsLock(async () => {
+      const { models } = await readSettings()
+      models[sessionId] = JSON.stringify(selection)
+      settingsCache.models[sessionId] = models[sessionId]!
+      await settingsScope.update({ models })
+    })
   }
   async function modelCatalog(): Promise<Array<{ provider: string; providerName: string; id: string; name: string }>> {
     const groups = await Promise.all(ctx.llm.listProviders().map(async (provider) => {

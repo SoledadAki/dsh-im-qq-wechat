@@ -1,7 +1,9 @@
-import { randomInt } from 'node:crypto'
 import type { ApprovalOutcome, ApprovalPrompt, BridgeQuestion, ChannelAdapter, ChannelReplyStream, ChannelStatus, InboundTextMessage } from './channel.js'
+import { rememberBounded } from './channel.js'
 import { ChannelInteractions } from './channel-interactions.js'
 import { createEditableMessageStream, splitMessageText } from './editable-stream.js'
+import { unsetCredentialBestEffort } from './credentials.js'
+import { PairingCode } from './pairing.js'
 import type { ChannelPersistence, CredentialAccess, PersistedChannelBinding } from './sidecar-channel.js'
 import { TelegramApi } from './telegram-api.js'
 
@@ -24,9 +26,12 @@ export class TelegramChannelAdapter implements ChannelAdapter {
   private readonly lastTarget = new Map<string, Target>()
   private readonly interactions: ChannelInteractions
   private controller?: AbortController
+  private starting?: Promise<void>
+  private generation = 0
   private api?: TelegramApi
   private bot?: { id: string; username?: string }
   private pairCode?: string
+  private readonly pairing = new PairingCode()
   private cursor?: number
 
   constructor(private readonly options: TelegramChannelOptions) {
@@ -53,6 +58,27 @@ export class TelegramChannelAdapter implements ChannelAdapter {
 
   async start(): Promise<void> {
     if (this.controller) return
+    // Memoize the in-flight start.  An unserialized check-then-await let the
+    // automatic start race the settings panel's 连接 action: both passed the
+    // guard above, both entered poll(), and both shared `cursor` — every update
+    // was processed twice, and stop() only aborted the newer controller, so the
+    // older long-poll kept consuming the owner's messages after 断开/解绑.
+    //
+    // `stop()` clears the memo, and the cleanup is identity-checked, so a
+    // 断开 → 连接 pair during the handshake starts a real second attempt instead
+    // of reusing the abandoned one (which would abort on its generation check and
+    // leave 连接 reporting success with a dead channel).
+    const run = this.doStart()
+    this.starting = run
+    try {
+      return await run
+    } finally {
+      if (this.starting === run) this.starting = undefined
+    }
+  }
+
+  private async doStart(): Promise<void> {
+    const generation = this.generation
     const binding = this.options.persistence.load()
     if (!binding) { this.status = { state: 'idle', connected: false }; return }
     const resolved = await this.options.credentials.resolve(this.options.tokenRef)
@@ -64,6 +90,9 @@ export class TelegramChannelAdapter implements ChannelAdapter {
       if (String(bot?.id ?? '') !== binding.accountId) throw new Error('Telegram Token 与保存的机器人不匹配')
       const webhook = await api.getWebhookInfo(controller.signal)
       if (webhook?.url) throw new Error('该机器人已配置 Webhook，请先移除 Webhook')
+      // stop() bumped the generation while we were awaiting: abandon this start
+      // instead of resurrecting a poll loop the operator already disconnected.
+      if (generation !== this.generation) { controller.abort(); return }
       this.controller = controller
       this.api = api
       this.bot = { id: String(bot.id), username: typeof bot.username === 'string' ? bot.username : undefined }
@@ -73,7 +102,14 @@ export class TelegramChannelAdapter implements ChannelAdapter {
         this.cursor = latest.length ? Number(latest.at(-1).update_id) + 1 : 0
         await this.persistCursor()
       }
-      if (!binding.ownerUserId) this.pairCode = this.newPairCode()
+      // The cursor probe above awaits too: re-check before publishing a
+      // connected status that stop() would have already cleared.
+      if (generation !== this.generation) {
+        controller.abort()
+        if (this.controller === controller) { this.controller = undefined; this.api = undefined }
+        return
+      }
+      if (!binding.ownerUserId) this.refreshPairingCode()
       this.status = binding.ownerUserId
         ? { state: 'bound', connected: true, boundUserId: binding.ownerUserId }
         : { state: 'awaiting-code', connected: true, code: this.pairCode }
@@ -89,13 +125,17 @@ export class TelegramChannelAdapter implements ChannelAdapter {
   }
 
   async stop(): Promise<void> {
+    this.generation++
+    // Drop the memo: a later start() must build a fresh attempt rather than
+    // reuse one this stop() just invalidated.
+    this.starting = undefined
     this.controller?.abort()
     this.controller = undefined
     this.api = undefined
     this.status = { ...this.status, connected: false }
   }
 
-  async dispose(): Promise<void> { await this.stop(); this.interactions.cancel(); this.listeners.clear(); this.targets.clear() }
+  async dispose(): Promise<void> { await this.stop(); this.interactions.cancel(); this.listeners.clear(); this.targets.clear(); this.lastTarget.clear() }
 
   async sendText(userId: string, text: string, replyToId?: string): Promise<void> {
     this.requireOwner(userId)
@@ -130,28 +170,46 @@ export class TelegramChannelAdapter implements ChannelAdapter {
   askQuestion(userId: string, questions: ReadonlyArray<BridgeQuestion>, signal?: AbortSignal): Promise<string[]> { this.requireOwner(userId); return this.interactions.askQuestion(questions, signal) }
   async startBinding(): Promise<{ qrDataUrl: string; code?: string }> { throw new Error('Telegram 请填写 Bot Token 后，通过私聊配对码绑定') }
   async submitCode(): Promise<{ ok: boolean; error?: string }> { return { ok: false, error: '请在 Telegram 私聊中发送配对码' } }
-  async cancelBinding(): Promise<void> { this.pairCode = this.newPairCode(); if (this.status.state === 'awaiting-code') this.status = { ...this.status, code: this.pairCode } }
-  async unbind(): Promise<void> { await this.stop(); await this.options.credentials.unset(this.options.tokenRef); await this.options.persistence.clear(); this.pairCode = undefined; this.status = { state: 'idle', connected: false } }
+  async cancelBinding(): Promise<void> { this.refreshPairingCode() }
+  async unbind(): Promise<void> {
+    await this.stop()
+    if (!await unsetCredentialBestEffort(this.options.credentials, this.options.tokenRef)) {
+      this.options.logger.warn('[telegram] credential is environment-managed; binding revoked but the secret stays in the launch environment')
+    }
+    await this.options.persistence.clear().catch(() => undefined)
+    this.clearPairing()
+    this.status = { state: 'idle', connected: false }
+  }
   getStatus(): ChannelStatus { return { ...this.status } }
   onInbound(callback: (message: InboundTextMessage) => void): () => void { this.listeners.add(callback); return () => this.listeners.delete(callback) }
 
   private async poll(signal: AbortSignal): Promise<void> {
     const api = this.requireApi()
+    // Pin the generation: a 断开 during an in-flight long poll must not be undone
+    // by this loop re-marking the channel connected afterwards.
+    const generation = this.generation
     let failures = 0
     while (!signal.aborted) {
       try {
         const updates = await api.getUpdates(this.cursor, signal)
-        for (const update of updates) {
-          this.cursor = Number(update.update_id) + 1
-          await this.acceptUpdate(update)
+        try {
+          for (const update of updates) {
+            this.cursor = Number(update.update_id) + 1
+            await this.acceptUpdate(update)
+          }
+        } finally {
+          // Persist in `finally`: when acceptUpdate throws mid-batch the
+          // in-memory cursor has already advanced, and skipping the write made
+          // a restart replay (and re-run) up to 100 already-handled updates —
+          // Telegram, unlike the sidecar adapters, keeps no dedup set.
+          if (updates.length) await this.persistCursor().catch(() => undefined)
         }
-        if (updates.length) await this.persistCursor()
         failures = 0
-        if (!this.status.connected) this.status = { ...this.status, connected: true, error: undefined }
+        if (generation === this.generation && !this.status.connected) this.status = { ...this.status, connected: true, error: undefined }
       } catch (error) {
         if (signal.aborted) return
         failures++
-        this.status = { ...this.status, connected: false, error: `Telegram 正在重连：${String(error)}` }
+        if (generation === this.generation) this.status = { ...this.status, connected: false, error: `Telegram 正在重连：${String(error)}` }
         this.options.logger.warn('[telegram] polling interrupted; retrying', error)
         await new Promise<void>((resolve) => {
           const done = () => { signal.removeEventListener('abort', onAbort); resolve() }
@@ -178,14 +236,20 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     const target: Target = { chatId: message.chat.id, replyToMessageId: message.message_id, messageThreadId: Number.isSafeInteger(message.message_thread_id) ? message.message_thread_id : undefined }
     const binding = this.options.persistence.load()
     if (!binding?.ownerUserId) {
-      if (message.chat.type === 'private' && text === this.pairCode) await this.claimOwner(binding!, userId, target)
+      if (message.chat.type === 'private' && this.pairCode !== undefined) {
+        // `check` is constant-time and self-rotates once the attempt budget is
+        // spent, so a guesser cannot grind the code and cannot lock the operator out.
+        const verdict = this.pairing.check(text)
+        if (verdict === 'match') await this.claimOwner(binding!, userId, target)
+        else if (verdict !== 'mismatch') this.refreshPairingCode()
+      }
       return
     }
     if (userId !== binding.ownerUserId) return
     const addressed = message.chat.type === 'private' || String(message.reply_to_message?.from?.id ?? '') === this.bot?.id || this.hasMention(message)
     if (!addressed) return
     const extId = String(update.update_id)
-    this.targets.set(extId, target); this.lastTarget.set(userId, target)
+    rememberBounded(this.targets, extId, target); this.lastTarget.set(userId, target)
     if (this.interactions.accept(text)) return
     if (!text) { await this.sendText(userId, '当前仅支持文本消息。', extId); return }
     const inbound: InboundTextMessage = { channel: this.kind, userId, extId, text, timestamp: Number(message.date) * 1000 || Date.now() }
@@ -195,7 +259,7 @@ export class TelegramChannelAdapter implements ChannelAdapter {
   private async claimOwner(binding: PersistedChannelBinding, userId: string, target: Target): Promise<void> {
     await this.options.persistence.save({ ...binding, ownerUserId: userId })
     this.lastTarget.set(userId, target)
-    this.pairCode = undefined
+    this.clearPairing()
     this.status = { state: 'bound', connected: true, boundUserId: userId }
     await this.requireApi().sendMessage({ ...target, text: '✅ Telegram 已安全绑定，现在可以直接给 DeepSeek Harness 发任务。', signal: this.controller?.signal })
   }
@@ -207,5 +271,10 @@ export class TelegramChannelAdapter implements ChannelAdapter {
   private withoutMention(text: string): string { const username = this.bot?.username; return username ? text.replace(new RegExp(`@${username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'ig'), '') : text }
   private requireApi(): TelegramApi { if (!this.api) throw new Error('Telegram 未连接'); return this.api }
   private requireOwner(userId: string): void { if (this.options.persistence.load()?.ownerUserId !== userId) throw new Error('Telegram owner mismatch') }
-  private newPairCode(): string { return String(randomInt(100000, 1000000)) }
+  /** Republish a fresh pairing code through the status the settings panel polls. */
+  private refreshPairingCode(): void {
+    this.pairCode = this.pairing.issue()
+    if (this.status.state === 'awaiting-code') this.status = { ...this.status, code: this.pairCode }
+  }
+  private clearPairing(): void { this.pairing.clear(); this.pairCode = undefined }
 }

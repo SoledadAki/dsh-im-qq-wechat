@@ -19,6 +19,13 @@ export interface SidecarClientOptions {
   readonly profileId: string
   readonly handshakeTimeoutMs?: number
   readonly requestTimeoutMs?: number
+  /**
+   * Called when the sidecar dies outside an explicit `stop()` — crash, protocol
+   * violation, or kill.  Without it the host had no way to learn that the
+   * channel was gone, so the settings panel kept reporting 已连接 while no
+   * message could arrive or be sent.
+   */
+  readonly onExit?: (error: Error) => void
   readonly logger: {
     warn(message: string, ...rest: unknown[]): void
     error(message: string, ...rest: unknown[]): void
@@ -127,7 +134,12 @@ export class SidecarClient {
   }
 
   private async spawnAndHandshake(): Promise<void> {
-    const child = spawn(process.execPath, [this.options.script], {
+    // `--no-warnings`: the child inherits the host's environment, so Node runtime
+    // notices from it (e.g. "(node:123) [UNDICI-EHPA] Warning: …" when
+    // NODE_USE_ENV_PROXY is set) were forwarded to the plugin log as warnings and
+    // made every healthy spawn look like a failure.  These are Node chatter, not
+    // sidecar diagnostics; the sidecar's own stderr writes are unaffected.
+    const child = spawn(process.execPath, ['--no-warnings', this.options.script], {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       env: { ...process.env, NO_COLOR: '1' },
@@ -140,6 +152,7 @@ export class SidecarClient {
       this.cleanup(error)
       this.process = undefined
       this.started = undefined
+      this.notifyExit(error)
     }
     child.once('error', fail)
     child.stdin.on('error', fail)
@@ -152,10 +165,12 @@ export class SidecarClient {
     child.once('exit', (code, signal) => {
       if (this.process !== child) return
       const error = new Error(`sidecar exited (${code ?? signal ?? 'unknown'})`)
-      if (!this.stopping) this.options.logger.error(error.message)
+      const unexpected = !this.stopping
+      if (unexpected) this.options.logger.error(error.message)
       this.cleanup(error)
       this.process = undefined
       this.started = undefined
+      this.notifyExit(error)
     })
     child.stdout.on('data', (chunk: Buffer) => {
       if (this.process !== child) return
@@ -232,6 +247,21 @@ export class SidecarClient {
     this.cleanup(error)
     this.process = undefined
     this.started = undefined
+    this.notifyExit(error)
+  }
+
+  /**
+   * Report an unexpected sidecar death to the owner, at most once per death.
+   * A deliberate `stop()` never notifies, so a normal shutdown cannot be
+   * mistaken for a crash and start a reconnect loop.
+   */
+  private notifyExit(error: Error): void {
+    if (this.stopping) return
+    try {
+      this.options.onExit?.(error)
+    } catch {
+      this.options.logger.warn('sidecar exit handler failed')
+    }
   }
 
   private cleanup(error: Error): void {

@@ -29,6 +29,94 @@ function headers(token = "", json = true) {
   return result;
 }
 
+/**
+ * Fetch with a bounded timeout and an optional external abort signal.
+ *
+ * The CDN calls used a bare `fetch`, which has neither: a stalled or trickling
+ * origin blocked the caller indefinitely (undici's bodyTimeout resets on every
+ * chunk).  For the monitor that was fatal — `stopMonitor` awaited the monitor
+ * task forever, and because frames are processed serially every later frame
+ * (health.ping, shutdown) queued behind it, leaving a live but mute sidecar.
+ */
+/**
+ * Run `work` under one abort controller that a timeout and an external signal
+ * can both cancel.
+ *
+ * `fetch` resolves as soon as the response HEADERS arrive, so a helper that
+ * releases the timer when `fetch` resolves leaves the body read unbounded — the
+ * exact "stalled or trickling origin blocks the caller forever" failure this is
+ * meant to prevent (undici's bodyTimeout resets on every chunk).  Callers must
+ * therefore consume the body *inside* `work`.
+ */
+async function withTimeout(work, { signal, timeoutMs = 30_000 } = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, timeoutMs);
+  try {
+    return await work(controller.signal);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
+/** Header-only fetch (used for the CDN upload, whose body carries no payload we need). */
+async function fetchWithTimeout(url, options = {}, bounded) {
+  return await withTimeout(async (signal) => {
+    const response = await fetch(url, { ...options, signal });
+    // Drain so the socket is released promptly even though we ignore the body.
+    if (response.body) await response.body.cancel().catch(() => undefined);
+    return response;
+  }, bounded);
+}
+
+/**
+ * Fetch and fully buffer a response inside the guarded scope, capped at
+ * `maxBytes` while reading rather than after buffering the whole body.
+ */
+async function fetchBoundedBuffer(url, { signal, timeoutMs = 30_000, maxBytes } = {}) {
+  return await withTimeout(async (innerSignal) => {
+    const response = await fetch(url, { signal: innerSignal });
+    if (!response.ok) return { response, body: Buffer.alloc(0) };
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new Error("Weixin CDN response exceeds the size limit");
+    }
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of response.body ?? []) {
+      total += chunk.length;
+      if (total > maxBytes) throw new Error("Weixin CDN response exceeds the size limit");
+      chunks.push(chunk);
+    }
+    return { response, body: Buffer.concat(chunks) };
+  }, { signal, timeoutMs });
+}
+
+/**
+ * Hosts allowed to serve inbound media.
+ *
+ * `full_url` is attacker-influenced payload data, and it used to be fetched
+ * verbatim — so a tampered message could make the sidecar issue an arbitrary GET
+ * (link-local metadata endpoints, LAN hosts) from the operator's machine.  A
+ * suffix allowlist over https keeps legitimate CDN hostname variation working
+ * while refusing any other origin.
+ */
+const TRUSTED_MEDIA_HOST_SUFFIXES = [".weixin.qq.com", ".qq.com"];
+
+function trustedCdnUrl(candidate) {
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "https:") return undefined;
+    const host = url.hostname.toLowerCase();
+    return TRUSTED_MEDIA_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix)) ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function request(baseUrl, endpoint, { method = "POST", token = "", body, timeoutMs = 15_000, signal } = {}) {
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -109,7 +197,9 @@ export async function sendText(baseUrl, token, toUserId, text, contextToken) {
       base_info: BASE_INFO,
     },
   });
-  if (response.ret && response.ret !== 0) throw new Error("Weixin sendmessage returned a failure");
+  if ((response.ret ?? 0) !== 0 || (response.errcode ?? 0) !== 0) {
+    throw new Error("Weixin sendmessage returned a failure");
+  }
   return clientId;
 }
 
@@ -142,11 +232,11 @@ export async function sendImage(baseUrl, token, toUserId, filePath, contextToken
       : ""
   );
   if (!uploadUrl) throw new Error("Weixin upload URL is missing");
-  const uploadResponse = await fetch(uploadUrl, {
+  const uploadResponse = await fetchWithTimeout(uploadUrl, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: ciphertext,
-  });
+  }, { timeoutMs: 60_000 });
   if (!uploadResponse.ok) throw new Error("Weixin CDN upload failed");
   const encryptedParam = uploadResponse.headers.get("x-encrypted-param") || "";
   if (!encryptedParam) throw new Error("Weixin CDN response is incomplete");
@@ -176,7 +266,9 @@ export async function sendImage(baseUrl, token, toUserId, filePath, contextToken
       base_info: BASE_INFO,
     },
   });
-  if (response.ret && response.ret !== 0) throw new Error("Weixin sendmessage returned a failure");
+  if ((response.ret ?? 0) !== 0 || (response.errcode ?? 0) !== 0) {
+    throw new Error("Weixin sendmessage returned a failure");
+  }
   return clientId;
 }
 
@@ -191,17 +283,27 @@ function decodeAesKey(value) {
   throw new Error("Weixin image AES key is invalid");
 }
 
-export async function downloadInboundImage(media, sessionDir, messageId, index = 0) {
+export async function downloadInboundImage(media, sessionDir, messageId, index = 0, signal) {
   const encryptedParam = String(media?.encrypt_query_param || "");
-  const sourceUrl = String(media?.full_url || "") || (
+  const declared = String(media?.full_url || "");
+  // Only the official CDN origin is trusted.  `full_url` used to be fetched
+  // verbatim, so a tampered payload could make the sidecar issue an arbitrary
+  // GET from the operator's machine (link-local metadata endpoints, LAN hosts).
+  const sourceUrl = (declared ? trustedCdnUrl(declared)?.href : undefined) || (
     encryptedParam
       ? `${CDN_BASE_URL}/download?encrypted_query_param=${encodeURIComponent(encryptedParam)}`
       : ""
   );
   if (!sourceUrl) throw new Error("Weixin image download URL is missing");
-  const response = await fetch(sourceUrl);
+  // The body is read inside the guarded scope and capped while reading: the old
+  // code released the timer at the headers and then buffered the whole body
+  // unbounded, so a stalled or oversized CDN response hung or OOM'd the sidecar.
+  const { response, body: ciphertext } = await fetchBoundedBuffer(sourceUrl, {
+    signal,
+    timeoutMs: 30_000,
+    maxBytes: MAX_IMAGE_BYTES + 16,
+  });
   if (!response.ok) throw new Error("Weixin image download failed");
-  const ciphertext = Buffer.from(await response.arrayBuffer());
   if (!ciphertext.length || ciphertext.length > MAX_IMAGE_BYTES + 16) {
     throw new Error("Weixin encrypted image size is invalid");
   }
@@ -221,7 +323,7 @@ export async function downloadInboundImage(media, sessionDir, messageId, index =
   return target;
 }
 
-export async function materializeInboundImages(raw, normalized, sessionDir) {
+export async function materializeInboundImages(raw, normalized, sessionDir, signal) {
   const items = Array.isArray(raw?.item_list) ? raw.item_list : [];
   let attachmentIndex = 0;
   for (const [itemIndex, item] of items.entries()) {
@@ -235,10 +337,15 @@ export async function materializeInboundImages(raw, normalized, sessionDir) {
         sessionDir,
         normalized.message_id,
         itemIndex,
+        signal,
       );
       attachment.download_url = "";
-    } catch {
+    } catch (error) {
+      // Still clear the URL (a dead CDN link is useless to the agent) but record
+      // the failure instead of swallowing it: the attachment previously ended up
+      // with neither `local_path` nor `download_url` and no indication why.
       attachment.download_url = "";
+      attachment.download_error = String(error?.message || error).slice(0, 200);
     }
   }
   return normalized;
@@ -293,7 +400,10 @@ export function normalizeInbound(raw) {
     message_id: messageId,
     reply_to_id: "",
     sender_id: String(raw?.from_user_id || ""),
-    text: String(textItem?.text_item?.text || ""),
+    // Cap inbound text: ipc.send throws when a frame exceeds MAX_FRAME_BYTES,
+    // and that throw was swallowed by the monitor loop's catch — so an oversized
+    // message was miscounted as a poll failure and silently dropped.
+    text: String(textItem?.text_item?.text || "").slice(0, 12_000),
     attachments,
     timestamp: Number.isFinite(raw?.create_time_ms)
       ? new Date(raw.create_time_ms).toISOString()

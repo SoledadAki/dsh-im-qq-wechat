@@ -142,6 +142,7 @@ export interface EnsureAgentOptions {
  */
 export class AgentManager {
   private readonly handles = new Map<string, AgentHandleLike>()
+  private readonly ensuring = new Map<string, Promise<{ agent: AgentLike; sessionId: SessionIdType; created: boolean }>>()
 
   constructor(
     private readonly agents: AgentsServiceLike,
@@ -155,6 +156,26 @@ export class AgentManager {
     options: EnsureAgentOptions = {},
   ): Promise<{ agent: AgentLike; sessionId: SessionIdType; created: boolean }> {
     const key = bindingKeyFor(channel, userId, this.opts.sharedSession)
+    // Serialize per conversation key.  Adapters deliver inbound messages without
+    // awaiting the previous handler, so two messages arriving back to back on
+    // first contact both saw no binding and both called `agents.create` with the
+    // same deterministic SessionId; the loser threw "session ... already exists"
+    // and the user got ⚠️ 处理失败 instead of an answer.
+    const inFlight = this.ensuring.get(key)
+    if (inFlight !== undefined) return await inFlight
+    const run = this.ensureOnce(key, channel, userId, presetId, options)
+      .finally(() => { this.ensuring.delete(key) })
+    this.ensuring.set(key, run)
+    return await run
+  }
+
+  private async ensureOnce(
+    key: string,
+    channel: ChannelKind,
+    userId: string,
+    presetId?: string,
+    options: EnsureAgentOptions = {},
+  ): Promise<{ agent: AgentLike; sessionId: SessionIdType; created: boolean }> {
     const known = this.opts.getBinding(key)
     if (known !== undefined) {
       const live = this.agents.get(SessionId(known))

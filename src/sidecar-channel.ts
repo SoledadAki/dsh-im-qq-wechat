@@ -14,7 +14,13 @@ import type {
   InboundTextMessage,
 } from './channel.js'
 import { SidecarClient, type SidecarFrame } from './sidecar-client.js'
+import { unsetCredentialBestEffort } from './credentials.js'
 import { splitMessageText } from './editable-stream.js'
+
+/** How long to wait for `binding.qr_displayed` before failing the RPC. */
+const QR_BINDING_TIMEOUT_MS = 30_000
+/** How long to fall back to plain messages after a native-stream failure. */
+const NATIVE_STREAM_COOLDOWN_MS = 5 * 60_000
 
 export interface PersistedChannelBinding {
   readonly accountId: string
@@ -86,7 +92,7 @@ export class SidecarChannelAdapter implements ChannelAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private reconnectAttempts = 0
   private intentionalStop = false
-  private nativeStreamAvailable = true
+  private nativeStreamDisabledUntil = 0
 
   constructor(private readonly options: SidecarChannelOptions) {
     this.kind = options.kind
@@ -96,8 +102,24 @@ export class SidecarChannelAdapter implements ChannelAdapter {
       profileId: options.profileId,
       logger: options.logger,
       requestTimeoutMs: 30_000,
+      onExit: (error) => this.handleSidecarExit(error),
     })
     this.client.onEvent((frame) => this.handleEvent(frame))
+  }
+
+  /**
+   * The sidecar died on its own.  Previously this was only logged, so the
+   * settings panel kept showing 已连接 while nothing could be received or sent —
+   * the README's "已连接但不响应".  Fail the state, release anything waiting on a
+   * QR, and let the normal backoff path respawn the process.
+   */
+  private handleSidecarExit(error: Error): void {
+    this.started = false
+    this.cancelBindingState(new Error('通道进程已退出，请重试'))
+    this.cancelInteractions()
+    if (this.intentionalStop) return
+    this.status = { ...this.status, connected: false, error: `通道进程已退出：${error.message}` }
+    this.scheduleReconnect()
   }
 
   async start(): Promise<void> {
@@ -186,7 +208,7 @@ export class SidecarChannelAdapter implements ChannelAdapter {
   }
 
   async openReplyStream(userId: string, replyToId: string): Promise<ChannelReplyStream | undefined> {
-    if (this.kind !== 'qq' || !this.nativeStreamAvailable) return undefined
+    if (this.kind !== 'qq' || Date.now() < this.nativeStreamDisabledUntil) return undefined
     const binding = this.requireOwner(userId)
     const streamId = randomUUID()
     const request = async (type: string, extra: Record<string, unknown> = {}): Promise<void> => {
@@ -194,8 +216,10 @@ export class SidecarChannelAdapter implements ChannelAdapter {
       if (frame.type === 'stream.failed') throw new Error('QQ native stream failed')
     }
     const disableNativeStream = (error: unknown): void => {
-      this.nativeStreamAvailable = false
-      this.options.logger.warn(`[qq] native stream disabled for this process: ${String(error)}`)
+      // A cooldown, not a process-wide kill switch: the previous flag disabled
+      // native streaming for the rest of the process after one transient failure.
+      this.nativeStreamDisabledUntil = Date.now() + NATIVE_STREAM_COOLDOWN_MS
+      this.options.logger.warn(`[qq] native stream paused for ${Math.round(NATIVE_STREAM_COOLDOWN_MS / 60_000)} min: ${String(error)}`)
     }
     try {
       await request('stream.start', { target_id: userId, reply_to_id: replyToId })
@@ -318,8 +342,35 @@ export class SidecarChannelAdapter implements ChannelAdapter {
     const qr = new Promise<{ qrDataUrl: string }>((resolve, reject) => {
       this.qrWaiter = { resolve, reject }
     })
-    await this.client.send('binding.start', { task_id: taskId })
-    return await qr
+    // The race below attaches later, so without this an early rejection (a failed
+    // `binding.start`, or a sidecar exit) would surface as an unhandled rejection,
+    // which the Harness turns into a fatal process exit.
+    void qr.catch(() => undefined)
+    try {
+      await this.client.send('binding.start', { task_id: taskId })
+    } catch (error) {
+      this.cancelBindingState(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    }
+    // Bound the wait.  The QR is resolved only by `binding.qr_displayed`, and
+    // neither `binding.qr_expired` nor a sidecar exit used to settle this
+    // promise — so `/api/qqbot/begin` never returned, and the settings card
+    // disabled both 扫码 and 取消绑定 until the page was reloaded.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        qr,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('生成二维码超时，请重试')), QR_BINDING_TIMEOUT_MS)
+          timer.unref?.()
+        }),
+      ])
+    } catch (error) {
+      this.cancelBindingState(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   async submitCode(_userId: string, code: string): Promise<{ ok: boolean; error?: string }> {
@@ -349,8 +400,15 @@ export class SidecarChannelAdapter implements ChannelAdapter {
 
   async unbind(): Promise<void> {
     await this.stop()
-    await this.options.credentials.unset(this.options.secretRef)
-    await this.options.persistence.clear()
+    // Best effort: `unset` legitimately fails for a launch-environment ref, and
+    // throwing here used to abort before the persisted owner was revoked — so
+    // 解绑 looked like it failed and `channels[kind]` (with the old owner) stayed
+    // on disk.
+    if (!await unsetCredentialBestEffort(this.options.credentials, this.options.secretRef)) {
+      this.options.logger.warn(`[${this.kind}] credential is environment-managed; binding revoked but the secret stays in the launch environment`)
+    }
+    await this.options.persistence.clear().catch(() => undefined)
+    this.cancelBindingState(new Error('绑定已解除'))
     this.status = { state: 'idle', connected: false }
   }
 
@@ -474,6 +532,13 @@ export class SidecarChannelAdapter implements ChannelAdapter {
         if (resolved === undefined || this.intentionalStop) return
         try {
           await this.startTransport(binding, resolved.value)
+          // The operator may have pressed 断开 while the respawn/handshake was in
+          // flight: do not resurrect the transport and report 已连接 afterwards.
+          if (this.intentionalStop) {
+            await this.client.send(this.kind === 'qq' ? 'gateway.stop' : 'monitor.stop', { account_id: binding.accountId }).catch(() => undefined)
+            return
+          }
+          this.started = true
         } catch (error) {
           this.options.logger.warn(`[${this.kind}] reconnect failed: ${String(error)}`)
           this.scheduleReconnect()
@@ -511,14 +576,18 @@ export class SidecarChannelAdapter implements ChannelAdapter {
     const approval = /^\/(approve|reject|同意|拒绝)\s+([a-f0-9]{8})$/i.exec(text)
     if (approval !== null) {
       const decision = approval[1]!.toLowerCase()
-      this.finishInteraction(approval[2]!.toLowerCase(), decision === 'approve' || decision === '同意' ? 'allowed-once' : 'rejected')
+      const id = approval[2]!.toLowerCase()
+      // Only a decision against a live approval is consumed; an unknown id is
+      // handed to the agent instead of disappearing without any reply.
+      if (this.interactions.get(id)?.kind !== 'approval') return false
+      this.finishInteraction(id, decision === 'approve' || decision === '同意' ? 'allowed-once' : 'rejected')
       return true
     }
     const answer = /^\/answer\s+([a-f0-9]{8})\s+([\s\S]+)$/i.exec(text)
     if (answer !== null) {
       const id = answer[1]!.toLowerCase()
       const pending = this.interactions.get(id)
-      if (pending?.kind !== 'question') return true
+      if (pending?.kind !== 'question') return false
       const answers = answer[2]!.split('|').map((item) => item.trim())
       if (answers.length !== pending.count || answers.some((item) => item === '')) return true
       clearTimeout(pending.timer)

@@ -112,3 +112,20 @@ export async function sendTypingBestEffort(
     // The reply itself can still proceed when a platform rejects typing.
   }
 }
+
+/**
+ * Insert into a map kept at a bounded size, evicting the oldest entries first.
+ *
+ * Per-message reply targets are keyed by platform message id, so without a cap
+ * they grow for the whole process lifetime — and on WeCom/Feishu the insert
+ * happened before the owner check, letting any third party who can message the
+ * bot drive that growth.
+ */
+export function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V, limit = 2_000): void {
+  map.set(key, value)
+  while (map.size > limit) {
+    const oldest = map.keys().next()
+    if (oldest.done === true) return
+    map.delete(oldest.value)
+  }
+}

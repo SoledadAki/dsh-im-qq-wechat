@@ -1,8 +1,10 @@
-import { randomInt } from 'node:crypto'
 import * as lark from '@larksuiteoapi/node-sdk'
 import type { ApprovalOutcome, ApprovalPrompt, BridgeQuestion, ChannelAdapter, ChannelReplyStream, ChannelStatus, InboundTextMessage } from './channel.js'
+import { rememberBounded } from './channel.js'
 import { ChannelInteractions } from './channel-interactions.js'
-import { splitMessageText } from './editable-stream.js'
+import { unsetCredentialBestEffort } from './credentials.js'
+import { splitMessageText, truncateMessageText } from './editable-stream.js'
+import { PairingCode } from './pairing.js'
 import type { ChannelPersistence, CredentialAccess, PersistedChannelBinding } from './sidecar-channel.js'
 
 interface FeishuTarget { chatId: string; messageId: string }
@@ -40,6 +42,9 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private client?: any
   private ws?: any
   private pairCode?: string
+  private readonly pairing = new PairingCode()
+  private starting?: Promise<void>
+  private generation = 0
   private registrationController?: AbortController
   private registrationTask?: Promise<void>
   private registrationQrReject?: (error: Error) => void
@@ -67,35 +72,88 @@ export class FeishuChannelAdapter implements ChannelAdapter {
 
   async start(): Promise<void> {
     if (this.ws) return
+    // Memoize the in-flight start.  The guard above is checked before the awaits
+    // in doStart(), so a second caller (automatic startup racing the panel's
+    // 连接, or a re-configure) used to build a second WSClient: the first socket
+    // was overwritten and never closed, and both dispatchers delivered every
+    // inbound event — one user message produced two agent turns and two replies.
+    //
+    // `stop()` clears the memo, and the cleanup is identity-checked, so a
+    // 断开 → 连接 pair during the handshake starts a real second attempt instead
+    // of reusing the abandoned one (which would abort on its generation check and
+    // leave 连接 reporting success with a dead channel).
+    const run = this.doStart()
+    this.starting = run
+    try {
+      return await run
+    } finally {
+      if (this.starting === run) this.starting = undefined
+    }
+  }
+
+  private async doStart(): Promise<void> {
+    const generation = this.generation
     const binding = this.options.persistence.load()
     if (!binding) { this.status = { state: 'idle', connected: false }; return }
     const [appIdValue, secretValue] = await Promise.all([this.options.credentials.resolve(this.options.appIdRef), this.options.credentials.resolve(this.options.appSecretRef)])
     if (!appIdValue || !secretValue) { this.status = { state: 'idle', connected: false, error: '飞书凭据已丢失，请重新配置' }; return }
     const domain = binding.baseUrl === 'lark' ? 'lark' : 'feishu'
+    // Hoisted so teardown can target exactly what this attempt built: after an
+    // interleaved stop(), a newer start() may already own `this.ws`/`this.client`.
+    let builtClient: any
+    let builtWs: any
+    const teardownAttempt = (): void => {
+      if (this.ws === builtWs) this.ws = undefined
+      if (this.client === builtClient) this.client = undefined
+      try { builtWs?.close({ force: true }) } catch { /* the socket may already be gone */ }
+    }
     try {
       await verifyApp(appIdValue.value, secretValue.value, domain, this.options.fetchImpl ?? fetch)
+      // stop() ran while we were awaiting: do not reconnect behind the operator's back.
+      if (generation !== this.generation) return
       const config = { appId: appIdValue.value, appSecret: secretValue.value, domain: domain === 'lark' ? lark.Domain.Lark : lark.Domain.Feishu }
-      this.client = new lark.Client(config)
-      const dispatcher = new lark.EventDispatcher({}).register({ 'im.message.receive_v1': (event: any) => { void this.acceptEvent(event); return {} } })
+      builtClient = new lark.Client(config)
+      this.client = builtClient
+      const dispatcher = new lark.EventDispatcher({}).register({ 'im.message.receive_v1': (event: any) => {
+        // Fire-and-forget must never leak a rejection: the Harness installs a
+        // global unhandledRejection handler that exits the whole process.
+        void this.acceptEvent(event).catch((error) => this.options.logger.warn('[feishu] inbound handling failed', error))
+        return {}
+      } })
       let readyResolve!: () => void
       let readyReject!: (error: Error) => void
       const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject })
+      // Attach a handler immediately so an abandoned handshake cannot surface as
+      // an unhandled rejection when WSClient construction throws synchronously.
+      void ready.catch(() => undefined)
       const timer = setTimeout(() => readyReject(new Error('飞书长连接握手超时')), 15_000)
-      this.ws = new lark.WSClient({ ...config, loggerLevel: lark.LoggerLevel.info, onReady: () => readyResolve(), onError: (error: Error) => readyReject(error), onReconnecting: () => { this.status = { ...this.status, connected: false } }, onReconnected: () => { this.status = { ...this.status, connected: true, error: undefined } } })
-      void this.ws.start({ eventDispatcher: dispatcher }).catch((error: Error) => readyReject(error))
+      timer.unref?.()
+      // The reconnect hooks pin this attempt's generation so a 断开 cannot be
+      // undone by a late socket event re-marking the channel connected.
+      const attemptWs = new lark.WSClient({ ...config, loggerLevel: lark.LoggerLevel.info, onReady: () => readyResolve(), onError: (error: Error) => readyReject(error), onReconnecting: () => { if (generation === this.generation) this.status = { ...this.status, connected: false } }, onReconnected: () => { if (generation === this.generation) this.status = { ...this.status, connected: true, error: undefined } } })
+      builtWs = attemptWs
+      this.ws = attemptWs
+      void attemptWs.start({ eventDispatcher: dispatcher }).catch((error: Error) => readyReject(error))
       await ready.finally(() => clearTimeout(timer))
-      if (!binding.ownerUserId) this.pairCode = this.newPairCode()
+      // stop() ran during the handshake: close only this attempt's socket rather
+      // than publishing a connected status the operator already revoked.
+      if (generation !== this.generation) { teardownAttempt(); return }
+      if (!binding.ownerUserId) this.refreshPairingCode()
       this.status = binding.ownerUserId
         ? { state: 'bound', connected: true, boundUserId: binding.ownerUserId }
         : { state: 'awaiting-code', connected: true, code: this.pairCode }
     } catch (error) {
-      await this.stop()
+      teardownAttempt()
       this.status = { state: binding.ownerUserId ? 'bound' : 'idle', connected: false, boundUserId: binding.ownerUserId || undefined, error: String(error) }
       throw error
     } finally { appIdValue.value = ''; secretValue.value = '' }
   }
 
   async stop(): Promise<void> {
+    this.generation++
+    // Drop the memo: a later start() must build a fresh attempt rather than
+    // reuse one this stop() just invalidated.
+    this.starting = undefined
     this.registrationQrReject?.(new Error('飞书扫码授权已取消'))
     this.registrationQrReject = undefined
     this.registrationController?.abort()
@@ -104,7 +162,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     this.ws?.close({ force: true }); this.ws = undefined; this.client = undefined
     this.status = { ...this.status, connected: false }
   }
-  async dispose(): Promise<void> { await this.stop(); this.interactions.cancel(); this.listeners.clear(); this.targets.clear() }
+  async dispose(): Promise<void> { await this.stop(); this.interactions.cancel(); this.listeners.clear(); this.targets.clear(); this.lastTarget.clear() }
 
   async sendText(userId: string, text: string, replyToId?: string): Promise<void> {
     this.requireOwner(userId)
@@ -139,14 +197,31 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     const reaction = await this.addReaction(target.messageId, 'OnIt').catch(() => undefined)
     const removeReaction = (reactionId: string) => this.removeReaction(target.messageId, reactionId)
     const sendRemainder = (text: string) => this.sendText(userId, text)
+    const sendWholeReply = (text: string) => this.sendText(userId, text)
+    // `finish`/`cancel` are object-literal shorthand methods, so `this` inside
+    // them is the stream object — capture the logger from the adapter scope.
+    const logger = this.options.logger
     let sequence = 0
     let pending = ''
     let timer: ReturnType<typeof setTimeout> | undefined
     let chain = Promise.resolve()
     let closed = false
+    let failed = false
     const setContent = (content: string): void => {
-      const next = content.slice(0, 28_000)
-      chain = chain.then(async () => { assertSuccess('飞书流式更新失败', await client.cardkit.v1.cardElement.content({ path: { card_id: cardId, element_id: 'stream_md' }, data: { content: next || '…', sequence: ++sequence, uuid: `content_${cardId}_${sequence}` } })) })
+      const next = truncateMessageText(content, 28_000)
+      // `.catch` terminates the chain.  Without it a single transient 429/500
+      // left `chain` rejected forever: every later update silently no-opped, and
+      // finish()'s `await chain` threw *before* closing the card and before
+      // sending the remaining chunks — the answer was lost and the card stayed
+      // on 正在生成….  A rejection reaching cancel() was also unhandled, which
+      // the Harness turns into a fatal process exit.
+      chain = chain.then(async () => {
+        if (failed) return
+        assertSuccess('飞书流式更新失败', await client.cardkit.v1.cardElement.content({ path: { card_id: cardId, element_id: 'stream_md' }, data: { content: next || '…', sequence: ++sequence, uuid: `content_${cardId}_${sequence}` } }))
+      }).catch((error) => {
+        failed = true
+        this.options.logger.warn('[feishu] streaming card update failed', error)
+      })
     }
     const flush = (): void => { if (!pending || closed) return; const text = pending; pending = ''; setContent(text) }
     return {
@@ -156,7 +231,23 @@ export class FeishuChannelAdapter implements ChannelAdapter {
         const chunks = splitMessageText(text, 28_000)
         if (timer) clearTimeout(timer); timer = undefined; pending = ''; setContent(chunks[0] ?? '处理完成。'); closed = true
         await chain
-        assertSuccess('飞书结束流式卡片失败', await client.cardkit.v1.card.settings({ path: { card_id: cardId }, data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: text.replace(/\s+/g, ' ').slice(0, 50) || '回答完成' } } }), sequence: ++sequence, uuid: `settings_${cardId}_${sequence}` } }))
+        let cardClosed = false
+        try {
+          // Close the card even when an earlier update failed, otherwise it keeps
+          // animating 正在生成… forever while the answer arrives elsewhere.
+          assertSuccess('飞书结束流式卡片失败', await client.cardkit.v1.card.settings({ path: { card_id: cardId }, data: { settings: JSON.stringify({ config: { streaming_mode: false, summary: { content: truncateMessageText(text.replace(/\s+/g, ' '), 50) || '回答完成' } } }), sequence: ++sequence, uuid: `settings_${cardId}_${sequence}` } }))
+          cardClosed = true
+        } catch (error) {
+          logger.warn('[feishu] streaming card could not be closed', error)
+        }
+        if (failed || !cardClosed) {
+          // Either the card content is incomplete or the card could not be
+          // finalised: deliver the whole answer as plain messages.
+          logger.warn('[feishu] streaming card unusable; sending the answer as plain messages')
+          await sendWholeReply(text).catch((sendError: unknown) => logger.warn('[feishu] plain fallback reply failed', sendError))
+          if (reaction) await removeReaction(reaction).catch(() => undefined)
+          return
+        }
         if (reaction) await removeReaction(reaction).catch(() => undefined)
         for (const chunk of chunks.slice(1)) await sendRemainder(chunk)
       },
@@ -228,10 +319,22 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     this.registrationController?.abort()
     this.registrationController = undefined
     this.registrationTask = undefined
-    this.pairCode = this.newPairCode()
+    this.refreshPairingCode()
     if (this.status.state === 'awaiting-code') this.status = { state: 'idle', connected: Boolean(this.ws) }
   }
-  async unbind(): Promise<void> { await this.stop(); await Promise.all([this.options.credentials.unset(this.options.appIdRef), this.options.credentials.unset(this.options.appSecretRef)]); await this.options.persistence.clear(); this.status = { state: 'idle', connected: false } }
+  async unbind(): Promise<void> {
+    await this.stop()
+    const removed = await Promise.all([
+      unsetCredentialBestEffort(this.options.credentials, this.options.appIdRef),
+      unsetCredentialBestEffort(this.options.credentials, this.options.appSecretRef),
+    ])
+    if (removed.includes(false)) {
+      this.options.logger.warn('[feishu] credentials are environment-managed; binding revoked but the secrets stay in the launch environment')
+    }
+    await this.options.persistence.clear().catch(() => undefined)
+    this.clearPairing()
+    this.status = { state: 'idle', connected: false }
+  }
   getStatus(): ChannelStatus { return { ...this.status } }
   onInbound(callback: (message: InboundTextMessage) => void): () => void { this.listeners.add(callback); return () => this.listeners.delete(callback) }
 
@@ -246,11 +349,18 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     const target = { chatId: String(event.message.chat_id ?? ''), messageId: String(event.message.message_id ?? '') }
     if (!userId || !target.chatId || !target.messageId) return
     const binding = this.options.persistence.load()
-    if (!binding?.ownerUserId) { if (event.message.chat_type === 'p2p' && text === this.pairCode) await this.claimOwner(binding!, userId, target); return }
+    if (!binding?.ownerUserId) {
+      if (event.message.chat_type === 'p2p' && this.pairCode !== undefined) {
+        const verdict = this.pairing.check(text)
+        if (verdict === 'match') await this.claimOwner(binding!, userId, target)
+        else if (verdict !== 'mismatch') this.refreshPairingCode()
+      }
+      return
+    }
     if (userId !== binding.ownerUserId) return
     if (event.message.chat_type !== 'p2p' && !(event.message.mentions?.length > 0)) return
     const extId = target.messageId
-    this.targets.set(extId, target); this.lastTarget.set(userId, target)
+    rememberBounded(this.targets, extId, target); this.lastTarget.set(userId, target)
     if (this.interactions.accept(text)) return
     if (!text) { await this.sendText(userId, '当前仅支持文本消息。', extId); return }
     const inbound: InboundTextMessage = { channel: this.kind, userId, extId, text, timestamp: Number(event.message.create_time) || Date.now() }
@@ -258,7 +368,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private async claimOwner(binding: PersistedChannelBinding, userId: string, target: FeishuTarget): Promise<void> {
-    await this.options.persistence.save({ ...binding, ownerUserId: userId }); this.lastTarget.set(userId, target); this.pairCode = undefined
+    await this.options.persistence.save({ ...binding, ownerUserId: userId }); this.lastTarget.set(userId, target); this.clearPairing()
     this.status = { state: 'bound', connected: true, boundUserId: userId }
     await this.sendText(userId, '✅ 飞书已安全绑定，现在可以直接给 DeepSeek Harness 发任务。', target.messageId)
   }
@@ -266,5 +376,10 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private requireOwner(userId: string): void { if (this.options.persistence.load()?.ownerUserId !== userId) throw new Error('Feishu owner mismatch') }
   private async addReaction(messageId: string, emoji: string): Promise<string> { const response = assertSuccess('飞书添加状态失败', await this.requireClient().im.v1.messageReaction.create({ path: { message_id: messageId }, data: { reaction_type: { emoji_type: emoji } } })); if (!response?.data?.reaction_id) throw new Error('飞书未返回 reaction_id'); return response.data.reaction_id }
   private async removeReaction(messageId: string, reactionId: string): Promise<void> { assertSuccess('飞书移除状态失败', await this.requireClient().im.v1.messageReaction.delete({ path: { message_id: messageId, reaction_id: reactionId } })) }
-  private newPairCode(): string { return String(randomInt(100000, 1000000)) }
+  /** Republish a fresh pairing code through the status the settings panel polls. */
+  private refreshPairingCode(): void {
+    this.pairCode = this.pairing.issue()
+    if (this.status.state === 'awaiting-code') this.status = { ...this.status, code: this.pairCode }
+  }
+  private clearPairing(): void { this.pairing.clear(); this.pairCode = undefined }
 }

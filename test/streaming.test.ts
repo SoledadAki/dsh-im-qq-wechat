@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createEditableMessageStream, splitMessageText } from '../src/editable-stream.js'
+import { createEditableMessageStream, splitMessageText, splitMessageTextByBytes, truncateMessageText } from '../src/editable-stream.js'
 import { TelegramApi, validTelegramToken } from '../src/telegram-api.js'
 import { InboundTracker } from '../src/correlation.js'
 
@@ -60,3 +60,25 @@ test('claimed Harness text deltas route only to their exact active turn', () => 
   assert.equal(tracker.appendTextDelta('s', 3, '你')[0]?.streamText, '你')
   assert.equal(tracker.appendTextDelta('s', 3, '好')[0]?.streamText, '你好')
 })
+
+test('byte-budget splitting keeps CJK replies inside a platform byte cap', () => {
+  for (const limit of [0, 3, 1.5, NaN, Infinity]) assert.throws(() => splitMessageTextByBytes('hello', limit), RangeError)
+  // WeCom documents 20480 *bytes*; counting UTF-16 units let a ~6.9k-character
+  // Chinese answer look compliant while being ~20.7 KB of UTF-8.
+  const text = '中'.repeat(10)
+  const chunks = splitMessageTextByBytes(text, 9)
+  assert.deepEqual(chunks, ['中中中', '中中中', '中中中', '中'])
+  assert.ok(chunks.every((chunk) => Buffer.byteLength(chunk, 'utf8') <= 9))
+  assert.equal(chunks.join(''), text)
+  const emoji = splitMessageTextByBytes('😀😀😀', 4)
+  assert.deepEqual(emoji, ['😀', '😀', '😀'])
+})
+
+test('truncation never emits a lone surrogate', () => {
+  assert.equal(truncateMessageText('abc', 5), 'abc')
+  // Cutting between the halves of an astral character is not well-formed UTF-16.
+  assert.equal(truncateMessageText('a😀b', 2), 'a')
+  assert.equal(truncateMessageText('😀😀', 2), '😀')
+  assert.ok(truncateMessageText('a😀b', 2).isWellFormed())
+})
+

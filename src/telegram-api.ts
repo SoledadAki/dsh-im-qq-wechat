@@ -1,4 +1,35 @@
 const DEFAULT_BASE_URL = 'https://api.telegram.org/'
+/** Upper bound for an honoured `retry_after`, so a hostile value cannot stall a turn. */
+const MAX_RETRY_AFTER_MS = 30_000
+
+export class TelegramApiError extends Error {
+  constructor(
+    message: string,
+    /** From `parameters.retry_after`; surfaced so callers can back off. */
+    readonly retryAfterMs?: number,
+    readonly errorCode?: number,
+  ) {
+    super(message)
+    this.name = 'TelegramApiError'
+  }
+}
+
+function readRetryAfterMs(body: any): number | undefined {
+  const seconds = Number(body?.parameters?.retry_after)
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined
+  return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS)
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted === true) { reject(new DOMException('Aborted', 'AbortError')); return }
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); resolve() }
+    const onAbort = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(new DOMException('Aborted', 'AbortError')) }
+    const timer = setTimeout(done, ms)
+    timer.unref?.()
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
 
 export function validTelegramToken(value: string): boolean {
   return /^\d{5,20}:[A-Za-z0-9_-]{20,}$/.test(value.trim())
@@ -24,7 +55,7 @@ export class TelegramApi {
     return this.call('sendChatAction', { chat_id: chatId, action: 'typing', ...(messageThreadId ? { message_thread_id: messageThreadId } : {}) }, signal, 15_000)
   }
 
-  private async call(method: string, payload: object, signal: AbortSignal | undefined, timeoutMs: number): Promise<any> {
+  private async call(method: string, payload: object, signal: AbortSignal | undefined, timeoutMs: number, attempt = 0): Promise<any> {
     const timeout = AbortSignal.timeout(timeoutMs)
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
     let response: Response
@@ -32,10 +63,20 @@ export class TelegramApi {
       response = await this.fetchImpl(`${DEFAULT_BASE_URL}bot${this.token}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: combined, redirect: 'error' })
     } catch (error) {
       if ((error as Error).name === 'AbortError' || (error as Error).name === 'TimeoutError') throw error
-      throw new Error(`Telegram ${method} 网络请求失败`)
+      throw new TelegramApiError(`Telegram ${method} 网络请求失败`)
     }
     const body = await response.json().catch(() => undefined) as any
-    if (!response.ok || body?.ok !== true) throw new Error(body?.description ?? `Telegram ${method} 失败`)
+    if (!response.ok || body?.ok !== true) {
+      const retryAfterMs = readRetryAfterMs(body)
+      // Telegram rate-limits message edits hard.  Honour a modest retry_after
+      // once instead of surfacing it: a rejected final edit used to truncate
+      // the answer (and the old code dropped retry_after entirely).
+      if (response.status === 429 && retryAfterMs !== undefined && attempt === 0 && signal?.aborted !== true) {
+        await sleep(retryAfterMs, signal)
+        return await this.call(method, payload, signal, timeoutMs, attempt + 1)
+      }
+      throw new TelegramApiError(body?.description ?? `Telegram ${method} 失败`, retryAfterMs, body?.error_code)
+    }
     return body.result
   }
 }

@@ -19,6 +19,8 @@ import {
 } from "./protocol.mjs";
 
 const ipc = new JsonLineIpc();
+/** Floor between message-less polls, so an empty 200 cannot become a hot loop. */
+const MIN_POLL_INTERVAL_MS = 1_000;
 let shuttingDown = false;
 let frameChain = Promise.resolve();
 let binding = null;
@@ -40,11 +42,14 @@ function failClosed() {
 
 function sleep(ms, signal) {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timer);
-      resolve();
-    }, { once: true });
+    if (signal?.aborted) { resolve(); return; }
+    const done = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); resolve(); };
+    const onAbort = () => { clearTimeout(timer); resolve(); };
+    // Remove the listener on the normal (timer) path too: the previous version
+    // left one closure behind per call, and the QR flow calls this every poll.
+    const timer = setTimeout(done, ms);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -136,9 +141,11 @@ async function stopMonitor(accountId = "", emitStopped = true) {
   const current = monitor;
   if (!current || (accountId && current.accountId !== accountId)) return;
   current.controller.abort();
-  try {
-    await current.task;
-  } catch {}
+  // Bound the wait: the monitor task can be parked in a platform call that does
+  // not observe the abort signal.  Awaiting it unbounded left `monitor.stop`
+  // (and therefore handleFrame, and every frame queued behind it) hanging
+  // forever — a live but permanently mute sidecar.
+  await Promise.race([current.task.catch(() => undefined), sleep(5_000)]);
   try {
     await notifyStop(current.baseUrl, current.token);
   } catch {}
@@ -161,6 +168,7 @@ async function runMonitor(state) {
     }
     emit("monitor.ready", { account_id: state.accountId }, state.profileId);
     while (!state.controller.signal.aborted) {
+      const startedAt = Date.now();
       try {
         const response = await getUpdates(
           state.baseUrl,
@@ -170,7 +178,12 @@ async function runMonitor(state) {
           state.controller.signal,
         );
         if (state.controller.signal.aborted) break;
-        if (response.longpolling_timeout_ms > 0) timeoutMs = response.longpolling_timeout_ms;
+        // Clamp the server-provided long-poll timeout: beyond 2^31-1 Node clamps
+        // setTimeout to 1 ms, which aborts every poll instantly.
+        const requested = Number(response.longpolling_timeout_ms);
+        if (Number.isFinite(requested) && requested > 0) {
+          timeoutMs = Math.min(Math.max(requested, 1_000), 120_000);
+        }
         const failed = (response.ret !== undefined && response.ret !== 0)
           || (response.errcode !== undefined && response.errcode !== 0);
         if (failed) {
@@ -202,6 +215,7 @@ async function runMonitor(state) {
             raw,
             normalizeInbound(raw),
             state.sessionDir,
+            state.controller.signal,
           );
           if (!message.message_id || !message.sender_id || message.message_type === 2) continue;
           pruneReplyContexts();
@@ -213,6 +227,15 @@ async function runMonitor(state) {
           });
           delete message.context_token;
           emit("monitor.message", { account_id: state.accountId, ...message }, state.profileId);
+        }
+        // Floor the interval between message-less polls.  A 200 with an empty
+        // body parses to `{}`, which the checks above accept as success, so a
+        // proxy or misbehaving gateway made this loop issue back-to-back HTTPS
+        // requests forever with no backoff.  Polls that returned real messages
+        // are never delayed.
+        const idleMs = MIN_POLL_INTERVAL_MS - (Date.now() - startedAt);
+        if (!Array.isArray(response.msgs) || response.msgs.length === 0) {
+          if (idleMs > 0) await sleep(idleMs, state.controller.signal);
         }
       } catch {
         if (state.controller.signal.aborted) break;
@@ -287,7 +310,13 @@ async function handleFrame(frame) {
       };
       payload.bot_token = "";
       monitor = state;
-      state.task = runMonitor(state);
+      // Observe the task: an unobserved rejection became an unhandledRejection,
+      // which the sidecar's own failClosed turns into an exit with no structured
+      // monitor.failed for the host to act on.
+      state.task = runMonitor(state).catch(() => {
+        if (monitor === state) monitor = null;
+        emit("monitor.failed", { account_id: state.accountId, message: "微信连接失败，请检查网络后重试。" }, state.profileId);
+      });
       break;
     }
     case "monitor.stop":
