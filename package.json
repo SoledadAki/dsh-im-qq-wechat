@@ -73,7 +73,7 @@
     "@deepseek-ai/schemastery": "3.18.2"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "1.73.0",
+    "@larksuiteoapi/node-sdk": "1.73.3",
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "1.0.4",
     "@wecom/aibot-node-sdk": "1.0.7"
