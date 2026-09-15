@@ -9,8 +9,11 @@ export type BridgeCommand =
   | { kind: 'use'; selector?: string }
   | { kind: 'stop' }
   | { kind: 'think'; effort?: string }
-  | { kind: 'safe'; preset?: 'read-only' | 'workspace-write' | 'danger-full-access' }
-  | { kind: 'unknown'; name: string }
+  | { kind: 'safe'; preset?: string }
+  /** Reached only when no matching approval is pending — the adapters consume
+   * valid decisions before the text ever gets this far. */
+  | { kind: 'approval'; decision: 'allow' | 'reject'; id?: string }
+  | { kind: 'answer'; id?: string }
 
 const aliases: Record<string, BridgeCommand['kind']> = {
   help: 'help', h: 'help', '帮助': 'help',
@@ -24,6 +27,9 @@ const aliases: Record<string, BridgeCommand['kind']> = {
   stop: 'stop', cancel: 'stop', '停止': 'stop',
   think: 'think', effort: 'think', '思考': 'think',
   safe: 'safe', permission: 'safe', '安全': 'safe',
+  approve: 'approval', '同意': 'approval',
+  reject: 'approval', '拒绝': 'approval',
+  answer: 'answer', '回答': 'answer',
 }
 
 const safetyAliases: Record<string, 'read-only' | 'workspace-write' | 'danger-full-access'> = {
@@ -47,14 +53,21 @@ function tokenize(input: string): string[] {
   return tokens
 }
 
-/** Parse only bridge control messages. Ordinary chat returns undefined. */
+/**
+ * Parse only bridge control messages. Ordinary chat returns undefined.
+ *
+ * A leading `/` is NOT enough to make something a command: the first token must
+ * be a known alias. An unrecognised leading slash used to be answered with
+ * "未知命令" and never reached the agent, which silently swallowed ordinary
+ * messages that merely start with a path (`/tmp 里有什么`, `/mnt/e/...`).
+ */
 export function parseBridgeCommand(text: string): BridgeCommand | undefined {
   const trimmed = text.trim()
   if (!trimmed.startsWith('/')) return undefined
   const tokens = tokenize(trimmed.slice(1))
   const rawName = (tokens.shift() ?? '').toLowerCase()
   const kind = aliases[rawName]
-  if (kind === undefined) return { kind: 'unknown', name: rawName }
+  if (kind === undefined) return undefined
   const value = tokens.join(' ').trim() || undefined
   switch (kind) {
     case 'new': return { kind, ...(value === undefined ? {} : { name: value }) }
@@ -62,7 +75,15 @@ export function parseBridgeCommand(text: string): BridgeCommand | undefined {
     case 'use': return { kind, ...(value === undefined ? {} : { selector: value }) }
     case 'model': return { kind, ...(value === undefined ? {} : { selector: value }) }
     case 'think': return { kind, ...(value === undefined ? {} : { effort: effortAliases[value.toLowerCase()] ?? value }) }
-    case 'safe': return { kind, ...(value === undefined ? {} : { preset: safetyAliases[value.toLowerCase()] }) }
+    // Keep an unrecognised level verbatim so the handler can name it back in an
+    // error; mapping it to undefined made `/safe 乱写` look like a bare `/safe`.
+    case 'safe': return { kind, ...(value === undefined ? {} : { preset: safetyAliases[value.toLowerCase()] ?? value }) }
+    case 'approval': return {
+      kind,
+      decision: rawName === 'reject' || rawName === '拒绝' ? 'reject' : 'allow',
+      ...(value === undefined ? {} : { id: value.toLowerCase() }),
+    }
+    case 'answer': return { kind, ...(value === undefined ? {} : { id: value.split(/\s+/)[0]!.toLowerCase() }) }
     default: return { kind } as BridgeCommand
   }
 }
@@ -83,7 +104,7 @@ export const BRIDGE_HELP = [
   '',
   '【运行设置】',
   '/think | /思考 [档位]      调整思考强度',
-  '  off(关闭) / low(低) / medium(中) / high(高) / max(极限)',
+  '  实际可选档位取决于当前模型：发送 /think 查看',
   '/safe | /安全 [等级]       调整安全等级',
   '  read(只读) / write(写入) / full(完全)',
   '/stop | /停止              停止当前任务',
@@ -95,6 +116,9 @@ export const BRIDGE_HELP = [
   '【审核】',
   '/同意 <编号> 或 /approve <编号>',
   '/拒绝 <编号> 或 /reject <编号>',
+  '/answer <编号> 答案1 | 答案2',
+  '',
+  '以上是全部会被拦截的指令。其他内容——包括以 / 开头的路径——都会原样交给助手。',
 ].join('\n')
 
 export function safetyLabel(value: string): string {

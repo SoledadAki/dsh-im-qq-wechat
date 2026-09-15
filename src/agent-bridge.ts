@@ -130,6 +130,12 @@ export interface AgentManagerOptions {
 
 export interface EnsureAgentOptions {
   readonly cwd?: string
+  /**
+   * Fail instead of falling back to a fresh session when the bound session
+   * cannot be resumed.  `/use` needs this: silently creating an empty session
+   * made a failed switch look successful.
+   */
+  readonly mustResume?: boolean
 }
 
 /**
@@ -177,6 +183,9 @@ export class AgentManager {
     options: EnsureAgentOptions = {},
   ): Promise<{ agent: AgentLike; sessionId: SessionIdType; created: boolean }> {
     const known = this.opts.getBinding(key)
+    if (known === undefined && options.mustResume === true) {
+      throw new Error(`no session is bound for ${key}`)
+    }
     if (known !== undefined) {
       const live = this.agents.get(SessionId(known))
       if (live !== undefined) return { agent: live, sessionId: live.id, created: false }
@@ -190,6 +199,7 @@ export class AgentManager {
         return { agent: handle.agent, sessionId: handle.agent.id, created: false }
       } catch (error) {
         this.opts.logger.warn(`[qq-weixin] resume ${known} failed, will create: ${String(error)}`)
+        if (options.mustResume === true) throw error instanceof Error ? error : new Error(String(error))
       }
     }
     const sessionId = SessionId(`qq-weixin-${key.replace(/[^a-zA-Z0-9-]/g, '-')}`)

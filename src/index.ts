@@ -259,7 +259,15 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       return undefined
     }
   }
-  function recordSession(key: string, id: string, cwd: string, name?: string): Promise<void> {
+  /**
+   * Upsert a session record and (by default) move it to the front of the history.
+   *
+   * `reorder: false` keeps `/list` numbering stable: `/use` used to move the
+   * selected session to the front, so the numbers from the `/list` the operator
+   * had just read were immediately wrong and the next `/use <n>` picked a
+   * different session.
+   */
+  function recordSession(key: string, id: string, cwd: string, name?: string, options: { reorder?: boolean } = {}): Promise<void> {
     return withSettingsLock(async () => {
       const current = await readSettings()
       const now = Date.now()
@@ -271,8 +279,10 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         createdAt: old?.createdAt ?? now,
         lastUsedAt: now,
       }
-      const history = sessionHistory(key).filter((item) => item !== id)
-      history.unshift(id)
+      const existing = sessionHistory(key)
+      const history = options.reorder === false
+        ? (existing.includes(id) ? existing : [id, ...existing])
+        : [id, ...existing.filter((item) => item !== id)]
       current.sessions[id] = JSON.stringify(meta)
       current.histories[key] = JSON.stringify(history.slice(0, 30))
       settingsCache.sessions[id] = current.sessions[id]!
@@ -313,6 +323,25 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         await replaceSettings(current)
       }
     })
+  }
+  /**
+   * Release an agent this plugin owns once its session stops being the active
+   * one. `/new` and `/work` replaced the binding without disposing anything, so
+   * every use left a live agent behind until the plugin unloaded.
+   *
+   * A session with a turn still in flight is kept: disposing it would silently
+   * kill the running task and drop its reply routing.
+   */
+  async function retireSession(oldId: string | undefined): Promise<void> {
+    if (oldId === undefined) return
+    const live = ctx.agents.get(SessionId(oldId))
+    if (live !== undefined && live.status === 'running') {
+      logger.info(`[qq-weixin] keeping session ${oldId} alive: a turn is still running`)
+      return
+    }
+    tracker.dropSession(oldId)
+    ownerBySession.delete(oldId)
+    await manager.disposeOwned(oldId).catch((error) => logger.warn(`[qq-weixin] could not dispose ${oldId}: ${String(error)}`))
   }
 
   function channelPersistence(kind: ChannelKind) {
@@ -618,8 +647,20 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       case 'help':
         await send(BRIDGE_HELP)
         return true
-      case 'unknown':
-        await send(`未知命令 /${command.name}\n发送 /help 查看命令`)
+      case 'approval': {
+        // The adapters consume a decision that matches a pending request, so
+        // reaching here means nothing is waiting. Previously this text was
+        // answered with "未知命令", which is simply wrong for a valid command.
+        const label = command.decision === 'allow' ? '同意' : '拒绝'
+        await send(command.id === undefined
+          ? `用法：/${label} <编号>（编号在审核消息里）`
+          : `没有待处理的审核请求 #${command.id}\n可能已处理或已超时。`)
+        return true
+      }
+      case 'answer':
+        await send(command.id === undefined
+          ? '用法：/answer <编号> 答案1 | 答案2'
+          : `没有问题 #${command.id} 在等待回答\n可能已回答或已超时。`)
         return true
       case 'status': {
         const { agent, sessionId } = await ensure()
@@ -642,9 +683,13 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
         return true
       }
       case 'new': {
+        const previousId = settingsCache.bindings[key]
         const result = await manager.createFresh(adapter.kind, userId, presetId, activeCwd(key))
         ownerBySession.set(result.sessionId, { channel: adapter.kind, userId })
         await recordSession(key, result.sessionId, activeCwd(key), command.name)
+        // The old session stays listed (so /use can return to it) but its agent
+        // no longer needs to stay resident.
+        if (previousId !== result.sessionId) await retireSession(previousId)
         await send(await newSessionCard({
           agent: result.agent,
           sessionId: result.sessionId,
@@ -787,9 +832,11 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
           return true
         }
         await setWorkspace(key, cwd)
+        const previousId = settingsCache.bindings[key]
         const result = await manager.createFresh(adapter.kind, userId, presetId, cwd)
         ownerBySession.set(result.sessionId, { channel: adapter.kind, userId })
         await recordSession(key, result.sessionId, cwd, cwd.split(/[\\/]/).filter(Boolean).at(-1))
+        if (previousId !== result.sessionId) await retireSession(previousId)
         await send(await newSessionCard({
           agent: result.agent,
           sessionId: result.sessionId,
@@ -821,11 +868,29 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
           await send(matches.length === 0 ? '没找到该会话。发送 /list 查看。' : 'ID 匹配到多个会话，请输入更完整的 ID。')
           return true
         }
-        const selectedMeta = sessionMeta(matches[0]!)
+        const targetId = matches[0]!
+        const selectedMeta = sessionMeta(targetId)
+        const previousId = settingsCache.bindings[key]
+        await manager.select(adapter.kind, userId, targetId)
+        let result: Awaited<ReturnType<typeof manager.ensure>>
+        try {
+          // mustResume: without it a session that cannot be resumed is silently
+          // replaced by a brand-new empty one, and /use still reported success —
+          // the operator believed they had switched back to their old context.
+          result = await manager.ensure(adapter.kind, userId, presetId, {
+            cwd: selectedMeta?.cwd ?? activeCwd(key),
+            mustResume: true,
+          })
+        } catch (error) {
+          logger.warn(`[qq-weixin] /use could not resume ${targetId}: ${String(error)}`)
+          if (previousId !== undefined) await manager.select(adapter.kind, userId, previousId).catch(() => undefined)
+          await send(`无法切换会话：${selectedMeta?.name ?? targetId.slice(-8)} 无法恢复\n可能已被删除或损坏，当前会话保持不变。`)
+          return true
+        }
+        // reorder:false keeps the /list numbering the operator just read valid.
+        // The workspace moves only now that the switch is known to have worked.
         if (selectedMeta?.cwd !== undefined) await setWorkspace(key, selectedMeta.cwd)
-        await manager.select(adapter.kind, userId, matches[0]!)
-        const result = await ensure()
-        await recordSession(key, result.sessionId, sessionMeta(result.sessionId)?.cwd ?? activeCwd(key))
+        await recordSession(key, result.sessionId, sessionMeta(result.sessionId)?.cwd ?? activeCwd(key), undefined, { reorder: false })
         const meta = sessionMeta(result.sessionId)
         await send(`已切换会话：${meta?.name ?? result.sessionId.slice(-8)}\n项目：${meta?.cwd ?? activeCwd(key)}`)
         return true
@@ -873,7 +938,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
           return true
         }
         if (!ctx.permissionPresets.names.includes(command.preset)) {
-          await send(`当前部署不提供安全等级：${command.preset}`)
+          await send(`不认识的安全等级：${command.preset}\n可选：只读(read) / 写入(write) / 完全(full)\n用法：/safe <等级>`)
           return true
         }
         ctx.permissionPresets.set(agent.session, command.preset)

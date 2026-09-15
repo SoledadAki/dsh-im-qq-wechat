@@ -32,8 +32,32 @@ test('thinking and safety aliases map to Harness values', () => {
   assert.deepEqual(parseBridgeCommand('/safe full'), { kind: 'safe', preset: 'danger-full-access' })
 })
 
-test('unknown slash commands are contained by the bridge', () => {
-  assert.deepEqual(parseBridgeCommand('/wat'), { kind: 'unknown', name: 'wat' })
+test('an unrecognised leading slash is ordinary content, not a command', () => {
+  // Regression guard: any leading "/" used to be consumed and answered with
+  // "未知命令", which silently swallowed messages that merely start with a path.
+  assert.equal(parseBridgeCommand('/wat'), undefined)
+  assert.equal(parseBridgeCommand('/tmp 目录下有什么'), undefined)
+  assert.equal(parseBridgeCommand('/mnt/e/AI/Work/deepseek harness 看看这里'), undefined)
+  assert.equal(parseBridgeCommand('/etc/hosts 是什么'), undefined)
+  // A known alias is still a command even with trailing words.
+  assert.deepEqual(parseBridgeCommand('/help me'), { kind: 'help' })
+})
+
+test('approval and answer commands are recognised by name', () => {
+  assert.deepEqual(parseBridgeCommand('/同意 abc12345'), { kind: 'approval', decision: 'allow', id: 'abc12345' })
+  assert.deepEqual(parseBridgeCommand('/APPROVE ABC12345'), { kind: 'approval', decision: 'allow', id: 'abc12345' })
+  assert.deepEqual(parseBridgeCommand('/拒绝 abc12345'), { kind: 'approval', decision: 'reject', id: 'abc12345' })
+  assert.deepEqual(parseBridgeCommand('/reject deadbeef'), { kind: 'approval', decision: 'reject', id: 'deadbeef' })
+  assert.deepEqual(parseBridgeCommand('/同意'), { kind: 'approval', decision: 'allow' })
+  assert.deepEqual(parseBridgeCommand('/answer abc12345 甲 | 乙'), { kind: 'answer', id: 'abc12345' })
+})
+
+test('an unrecognised safety level survives parsing so it can be reported', () => {
+  // Previously `/safe 乱写` mapped to preset: undefined, i.e. it was
+  // indistinguishable from a bare `/safe` and silently printed the level.
+  assert.deepEqual(parseBridgeCommand('/safe 乱写'), { kind: 'safe', preset: '乱写' })
+  assert.deepEqual(parseBridgeCommand('/safe'), { kind: 'safe' })
+  assert.deepEqual(parseBridgeCommand('/safe full'), { kind: 'safe', preset: 'danger-full-access' })
 })
 
 test('context token counts use compact startup-card labels', () => {
