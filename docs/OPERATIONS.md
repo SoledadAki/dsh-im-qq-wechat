@@ -7,13 +7,13 @@
 从 GitHub Release 下载预构建安装包，在下载目录运行：
 
 ```sh
-dsh plugin --profile web add ./dsh-im-qq-wechat-0.5.3.tgz
+dsh plugin --profile web add ./dsh-im-qq-wechat-0.5.5.tgz
 dsh --profile web
 ```
 
 首次安装会联网拉取运行依赖，之后不需要再执行 pnpm install / build。源码开发与发布流程见 CONTRIBUTING.md。
 
-升级前先停掉插件，备份正在使用的 Harness profile、插件状态和 credentials 存储，并留一份旧版 tgz 用于回滚。0.5.3 沿用原有持久化格式：回滚时停掉 Host、装上旧包即可；只在状态损坏时才从备份恢复，避免覆盖升级后的会话内容。
+升级前先停掉插件，备份正在使用的 Harness profile、插件状态和 credentials 存储，并留一份旧版 tgz 用于回滚。0.5.5 沿用原有持久化格式：回滚时停掉 Host、装上旧包即可；只在状态损坏时才从备份恢复，避免覆盖升级后的会话内容。
 
 ## 真实通道验收
 
