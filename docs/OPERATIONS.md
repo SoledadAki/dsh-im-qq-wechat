@@ -2,7 +2,7 @@
 
 ## 安装与升级
 
-运行环境：Node.js 22+，DeepSeek Harness Web 0.1.5-rc.2。源码开发与打包另需 Node.js 22.13+、pnpm 11.19.0。
+运行环境：Node.js 22.19+，DeepSeek Harness Web 0.1.5-rc.2。源码开发与打包另需 pnpm 11.19.0。
 
 从 GitHub Release 下载预构建安装包，在下载目录运行：
 

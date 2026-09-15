@@ -1,6 +1,6 @@
 # 开发与维护
 
-需要 Node.js 22.13+ 和 pnpm 11.19.0。Host peer dependencies 固定为 0.1.5-rc.2。
+需要 Node.js 22.19+ 和 pnpm 11.19.0。Host peer dependencies 固定为 0.1.5-rc.2。
 
 ```sh
 pnpm install --frozen-lockfile

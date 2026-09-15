@@ -4,7 +4,7 @@
 
 ## 安装
 
-适用环境：**DeepSeek Harness 0.1.5-rc.2 的 Web profile**、Node.js 22+。请先在 Harness 中配置可用模型。
+适用环境：**DeepSeek Harness 0.1.5-rc.2 的 Web profile**、Node.js 22.19+。请先在 Harness 中配置可用模型。
 
 1. 从 [GitHub Release 下载 dsh-im-qq-wechat-0.5.5.tgz](https://github.com/SoledadAki/dsh-im-qq-wechat/releases/download/v0.5.5/dsh-im-qq-wechat-0.5.5.tgz)。**保留 `.tgz` 原文件，不要解压，也不要下载仓库的 “Source code (zip)” 当作安装包。**
 2. 在运行 Harness 的同一个环境中打开终端，安装到你实际使用的 profile。默认 Web profile 为 `web`：
@@ -75,7 +75,7 @@ dsh plugin --profile web remove dsh-im-qq-wechat
 
 ## 开发者
 
-源码、测试与 CI 在 Git 仓库中，不打进安装包。开发需要 Node.js 22.13+、pnpm 11.19.0。
+源码、测试与 CI 在 Git 仓库中，不打进安装包。开发需要 Node.js 22.19+、pnpm 11.19.0。
 
 ```sh
 pnpm install --frozen-lockfile
