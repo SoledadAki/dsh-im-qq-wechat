@@ -9,6 +9,9 @@ updates:
       # Host and QQ SDK contracts need deliberate compatibility review.
       - dependency-name: '@deepseek-ai/*'
       - dependency-name: '@tencent-connect/*'
+      # Types track the supported Node floor (engines), not the latest Node.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
     groups:
       development:
         dependency-type: development
