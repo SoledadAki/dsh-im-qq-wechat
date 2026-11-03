@@ -2,7 +2,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import yaml from 'js-yaml'
+import { load } from 'js-yaml'
 
 /** The subset of `@deepseek-ai/dsh-settings` SettingsForms this plugin uses. */
 export interface SettingsFormsLike {
@@ -95,7 +95,7 @@ export async function migrateLegacyState(
       continue
     }
     try {
-      const section = (yaml.load(text) as Record<string, unknown> | null)?.['qq-weixin'] as Record<string, unknown> | undefined
+      const section = (load(text) as Record<string, unknown> | null)?.['qq-weixin'] as Record<string, unknown> | undefined
       if (!section || typeof section !== 'object') return
       const doc: Partial<StateDoc> = {}
       for (const key of STATE_KEYS) if (isStringDict(section[key])) doc[key] = section[key]
