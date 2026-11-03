@@ -18,6 +18,7 @@
 - `verify-package` 修复 Windows 上 GNU tar 把 `E:` 当作远程主机的问题。
 - 新增 `state-store` 单元测试。
 - 开发/CI 依赖通过 pnpm overrides 升级到已修复版本（axios、follow-redirects、undici、@modelcontextprotocol/sdk、proxy-addr、zod 等），`pnpm audit` 清零。
+- 合入 Dependabot 更新：飞书 `@larksuiteoapi/node-sdk` 1.76.0；`actions/checkout` v7.0.1、`actions/setup-node` v7.1.0；TypeScript 7.0.2、esbuild 0.28.2、tsx 4.23；`@types/node` 保持与 Node 22.19 基线一致。
 
 ## 0.5.7
 
