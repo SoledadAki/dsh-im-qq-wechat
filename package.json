@@ -77,7 +77,7 @@
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "1.0.4",
     "@wecom/aibot-node-sdk": "1.0.7",
-    "js-yaml": "4.3.2"
+    "js-yaml": "5.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
