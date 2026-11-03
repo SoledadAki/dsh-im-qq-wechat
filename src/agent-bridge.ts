@@ -1,4 +1,4 @@
-/** Persistent Agent lifecycle using the public Harness 0.1.5-rc.2 contracts. */
+/** Persistent Agent lifecycle using the public Harness 0.2 contracts. */
 
 import { randomBytes } from 'node:crypto'
 

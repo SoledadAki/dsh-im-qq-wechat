@@ -44,7 +44,7 @@ test('approval without an exact route fails closed', async () => {
   assert.equal(outcome, 'unavailable')
 })
 
-test('user questions return the 0.1.5-rc.2 structured answer shape', async () => {
+test('user questions return the Harness structured answer shape', async () => {
   let provider: any
   const adapter = {
     askQuestion: async () => ['允许,稍后', '自定义文本'],

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile, copyFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, writeFile, copyFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -9,6 +9,7 @@ import vm from 'node:vm'
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
 const directory = await mkdtemp(join(tmpdir(), 'dsh-im-host-'))
 const home = join(directory, 'home')
+const hostVersion = JSON.parse(await readFile(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.json')), 'utf8')).version
 const cli = join(dirname(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.json'))), 'lib/bin.js')
 const archive = join(directory, `${manifest.name}-${manifest.version}.tgz`)
 await copyFile(resolve('dist', `${manifest.name}-${manifest.version}.tgz`), archive)
@@ -16,6 +17,21 @@ const env = { ...process.env, DSH_HOME: home, CI: 'true', NO_COLOR: '1' }
 const installed = spawnSync(process.execPath, [cli, 'plugin', '--profile', 'web', 'add', archive, '--ignore-scripts'], { env, encoding: 'utf8', windowsHide: true, timeout: 180_000 })
 assert.equal(installed.status, 0, installed.stderr)
 const installedRoot = join(home, 'profiles', 'web', 'node_modules', manifest.name)
+// A Harness 0.1 settings.yaml section: the plugin must carry it into its 0.2 profile entry.
+const legacyBinding = JSON.stringify({ accountId: 'legacy-account', ownerUserId: 'legacy-owner' })
+await mkdir(home, { recursive: true })
+await writeFile(join(home, 'settings.yaml'), `qq-weixin:
+  bindings:
+    feishu:legacy-owner: legacy-session
+  channels:
+    feishu: '${legacyBinding}'
+`)
+async function profileState() {
+  const dir = join(home, 'profiles', 'web')
+  let text = ''
+  for (const file of await readdir(dir)) if (file.endsWith('.yml') || file.endsWith('.yaml')) text += await readFile(join(dir, file), 'utf8')
+  return text
+}
 const probe = join(directory, 'probe.mjs')
 await writeFile(probe, `
 import assert from 'node:assert/strict'
@@ -110,6 +126,15 @@ try {
   assert.equal(body.result.ok, true, JSON.stringify(body))
   assert.deepEqual(Object.keys(body.result.value.channels).sort(), ['feishu', 'qq', 'telegram', 'wechat', 'wecom'])
   for (const { status } of Object.values(body.result.value.channels)) assert.equal(status.state, 'idle')
+  let state = await profileState()
+  while (!state.includes('legacy-session') && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    state = await profileState()
+  }
+  assert.ok(state.includes('channelState') && state.includes('legacy-owner') && state.includes('legacy-session'), 'Legacy settings.yaml state was not migrated: ' + state)
+  const unbound = await (await request('unbind', { channel: 'feishu' })).json()
+  assert.equal(unbound.result.ok, true, JSON.stringify(unbound))
+  assert.ok(!(await profileState()).includes('legacy-account'), 'unbind must revoke the persisted owner')
   const invalid = await (await request('connect', { channel: 'unknown' })).json()
   assert.equal(invalid.result.ok, false)
   assert.ok(invalid.result.error.details, 'RPC failures must satisfy the current envelope')
@@ -117,7 +142,7 @@ try {
     if (output.includes('agent_contract_failed:') || Date.now() > deadline) throw new Error('Agent probe failed: ' + output.replace(/([?&]token=)[^\s&)]+/g, '$1[redacted]'))
     await new Promise(resolve => setTimeout(resolve, 100))
   }
-  console.log('host_verified: Harness 0.1.5-rc.2 boots installed archive; bundled settings RPC, authenticated status, five idle channels, unauthorized requests rejected')
+  console.log(`host_verified: Harness ${hostVersion} boots installed archive; legacy state migrated and revocable; bundled settings RPC, authenticated status, five idle channels, unauthorized requests rejected`)
 } finally {
   if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
   else child.kill('SIGTERM')

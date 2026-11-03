@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 // Run the released archive in a fresh consumer directory, without lifecycle
@@ -16,7 +16,8 @@ function run(command, args, cwd = directory) {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   return result.stdout
 }
-const entries = run('tar', ['-tf', archive]).trim().split(/\r?\n/)
+// Relative name: GNU tar (Git Bash) reads a drive letter like `E:` as a remote host.
+const entries = run('tar', ['-tf', basename(archive)], dirname(archive)).trim().split(/\r?\n/)
 for (const entry of entries) {
   assert.match(entry, /^package\//)
   assert.doesNotMatch(entry, /(?:^|\/)(?:test|src|scripts|node_modules|\.git|docs)(?:\/|$)|\.map$|\.log$|\.env/)

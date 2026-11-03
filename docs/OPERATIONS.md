@@ -2,18 +2,20 @@
 
 ## 安装与升级
 
-运行环境：Node.js 22.19+，DeepSeek Harness Web 0.1.5-rc.2。源码开发与打包另需 pnpm 11.19.0。
+运行环境：Node.js 22.19+，DeepSeek Harness Web 0.2.1-rc.5。源码开发与打包另需 pnpm 11.19.0。
 
 从 GitHub Release 下载预构建安装包，在下载目录运行：
 
 ```sh
-dsh plugin --profile web add ./dsh-im-qq-wechat-0.5.7.tgz
+dsh plugin --profile web add ./dsh-im-qq-wechat-0.6.0.tgz
 dsh --profile web
 ```
 
 首次安装会联网拉取运行依赖，之后不需要再执行 pnpm install / build。源码开发与发布流程见 CONTRIBUTING.md。
 
-升级前先停掉插件，备份正在使用的 Harness profile、插件状态和 credentials 存储，并留一份旧版 tgz 用于回滚。0.5.7 沿用原有持久化格式：回滚时停掉 Host、装上旧包即可；只在状态损坏时才从备份恢复，避免覆盖升级后的会话内容。
+升级前先停掉插件，备份正在使用的 Harness profile（含 `$DSH_HOME/settings.yaml`）、credentials 存储，并留一份旧版 tgz 用于回滚。
+
+0.6.0 起要求 Harness 0.2：插件状态（绑定、owner、会话、工作区等）不再写入 `settings.yaml`，而是作为插件配置条目 `qq-weixin` 的实时字段保存在 profile 配置里（旧的 `channels` 状态字段改名为 `channelState`，避免与通道列表冲突）。首次启动时插件会自动导入旧 `settings.yaml`（或宿主改名后的 `settings.yaml.imported`）中的 `qq-weixin` 段；已有状态时不会覆盖。回滚到 0.5.x 需同时回退 Harness 到 0.1.5-rc.2，并把 `settings.yaml.imported` 改回 `settings.yaml`；升级后新增的绑定不会带回旧版。
 
 ## 真实通道验收
 
@@ -31,7 +33,7 @@ QQ / 微信还应检查扫码取消和重新绑定。飞书、企业微信及 Te
 
 | 现象 | 检查与处理 |
 | --- | --- |
-| 设置页没有插件入口 | 确认安装了包含 lib/client.js 的 tgz；源码构建应输出 client_bundle_ok；核对 Host 0.1.5-rc.2 兼容性。 |
+| 设置页没有插件入口 | 确认安装了包含 lib/client.js 的 tgz；源码构建应输出 client_bundle_ok；核对 Host 0.2.1-rc.5 兼容性。 |
 | 已连接但不执行消息 | 检查 owner 是否完成私聊配对、群聊是否满足 @ / 回复条件，以及通道是否仅支持当前消息类型。 |
 | sidecar handshake / request timed out | 检查 Node 可执行文件、sidecar 路径与 SDK 依赖完整性；重启后检查已脱敏的错误日志。 |
 | sidecar protocol failure | 输出不符合认证 JSON-lines 协议；检查是否误将调试日志写入 stdout。调试日志应使用 stderr。 |
