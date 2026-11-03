@@ -2,6 +2,9 @@ packages:
   - .
 nodeLinker: hoisted
 autoInstallPeers: true
+# The dev host pulls large tarballs (dsh-experimental-inspector ~24 MB); the 60s default times out on CI.
+fetchTimeout: 300000
+fetchRetries: 5
 overrides:
   js-yaml@^4.1.0: 4.3.2
   axios@^1: ^1.21.0
