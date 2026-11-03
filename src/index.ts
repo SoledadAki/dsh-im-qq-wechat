@@ -1,4 +1,4 @@
-/** Harness 0.1.5-rc.2 Host plugin: persistent IM agents and authenticated setup. */
+/** Harness 0.2 Host plugin: persistent IM agents and authenticated setup. */
 
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { installImRpc } from './rpc.js'
@@ -30,11 +30,31 @@ import { SidecarChannelAdapter, type PersistedChannelBinding } from './sidecar-c
 import { TelegramChannelAdapter } from './telegram-channel.js'
 import { FeishuChannelAdapter } from './feishu-channel.js'
 import { WecomChannelAdapter } from './wecom-channel.js'
+import { createStateScope, migrateLegacyState, type SettingsFormsLike } from './state-store.js'
 import { BRIDGE_HELP, formatTokenCount, parseBridgeCommand, safetyLabel } from './commands.js'
 
 export const name = 'qq-weixin'
 
 export const inject = ['agents', 'approval', 'permissionPresets', 'llm', 'userQuestions', 'settings', 'credentials', 'timer', 'connection', 'agentPresets', 'agentDefaultModel']
+
+/** Live reference the Host hands out for each `.volatile()` Config field. */
+/** Minimal cordis fiber shape needed to find the owning profile entry. */
+interface FiberLike {
+  entry?: { id: string; options?: { id?: string } }
+  parent: { fiber: FiberLike }
+}
+
+/** Settings forms are keyed by the entry's own `options.id`, not `loader.locate()`'s `include:` path. */
+function profileEntryId(fiber: FiberLike): string | undefined {
+  for (;;) {
+    if (fiber.entry) return fiber.entry.options?.id ?? fiber.entry.id
+    const next = fiber.parent.fiber
+    if (next === fiber) return undefined
+    fiber = next
+  }
+}
+
+interface VolatileRef<T> { get(): T | undefined }
 
 export interface PluginConfig {
   readonly channels: string[]
@@ -47,6 +67,14 @@ export interface PluginConfig {
   readonly replyTimeoutMs: number
   /** Hide local absolute workspace paths before sending text to IM platforms. */
   readonly redactWorkspacePaths: boolean
+  /* Runtime state, written by the plugin itself without remounting. */
+  readonly bindings: VolatileRef<Record<string, string>>
+  readonly channelState: VolatileRef<Record<string, string>>
+  readonly sessions: VolatileRef<Record<string, string>>
+  readonly histories: VolatileRef<Record<string, string>>
+  readonly workspaces: VolatileRef<Record<string, string>>
+  readonly efforts: VolatileRef<Record<string, string>>
+  readonly models: VolatileRef<Record<string, string>>
 }
 
 export const Config = z.object({
@@ -59,18 +87,18 @@ export const Config = z.object({
   approvalPolicy: z.union(['ask', 'never']).default('ask'),
   replyTimeoutMs: z.number().min(0).max(2_147_483_647).default(0),
   redactWorkspacePaths: z.boolean().default(true),
-})
-
-/** settings 命名空间：channel/user → sessionId 的持久化映射。 */
-const SETTINGS_NS = 'qq-weixin'
-const SETTINGS_SCHEMA = z.object({
-  bindings: z.dict(z.string()).default({}),
-  channels: z.dict(z.string()).default({}),
-  sessions: z.dict(z.string()).default({}),
-  histories: z.dict(z.string()).default({}),
-  workspaces: z.dict(z.string()).default({}),
-  efforts: z.dict(z.string()).default({}),
-  models: z.dict(z.string()).default({}),
+  /*
+   * Runtime state (channel/user → sessionId 映射、owner、会话历史等)。Harness 0.2
+   * 只允许插件改写自身 Config 中的 volatile 字段，且改写不会重载插件。
+   * 旧 settings 段的 `channels` 与上面的通道列表同名，因此这里叫 `channelState`。
+   */
+  bindings: z.dict(z.string()).default({}).volatile(),
+  channelState: z.dict(z.string()).default({}).volatile(),
+  sessions: z.dict(z.string()).default({}).volatile(),
+  histories: z.dict(z.string()).default({}).volatile(),
+  workspaces: z.dict(z.string()).default({}).volatile(),
+  efforts: z.dict(z.string()).default({}).volatile(),
+  models: z.dict(z.string()).default({}).volatile(),
 })
 
 /** credentials 只存引用（环境变量形状的 ref），值由提供方持有。 */
@@ -94,17 +122,7 @@ interface HostCtx {
     resume(options: ResumeAgentOptionsLike): Promise<AgentHandleLike>
     get(id: SessionId): AgentLike | undefined
   }
-  settings: {
-    register(namespace: string, schema: unknown): {
-      get(): unknown
-      update(patch: unknown): Promise<void>
-      /**
-       * Replace the whole namespace section.  `update` deep-merges, so it can
-       * only add or overwrite keys — revoking anything requires this.
-       */
-      replace(section: unknown): Promise<void>
-    }
-  }
+  settings: SettingsFormsLike
   credentials: {
     describe(ref: string): Promise<{ configured: boolean; writable: boolean }>
     resolve(ref: string): Promise<{ value: string; source: string } | undefined>
@@ -132,6 +150,8 @@ interface HostCtx {
   agentPresets: PresetsLike
   agentDefaultModel: DefaultModelLike
   connection: HostConnectionHandle
+  fiber: FiberLike
+  get(name: string): unknown
 }
 
 interface RpcOk {
@@ -164,7 +184,11 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
   }
 
   /* ---- settings 命名空间（会话映射持久化） ---- */
-  const settingsScope = ctx.settings.register(SETTINGS_NS, SETTINGS_SCHEMA)
+  const entryId = profileEntryId(ctx.fiber) ?? name
+  const settingsScope = createStateScope(ctx.settings, entryId, config)
+  // 状态由插件自己的设置面板管理，不要让 Host 再自动生成一页原始字段。
+  ctx.effect(() => ctx.settings.configure({ auto: false }), 'qq-weixin: settings presentation')
+  const profileHome = (ctx.get('profileContext') as { home?: string } | undefined)?.home
   interface SettingsDoc {
     bindings: Record<string, string>
     channels: Record<string, string>
@@ -196,7 +220,7 @@ export function apply(ctx: HostCtx, config: PluginConfig): void {
       models: { ...(resolved?.models ?? {}) },
     }
   }
-  const settingsReady = readSettings().then((settings) => {
+  const settingsReady = migrateLegacyState(settingsScope, profileHome, logger).then(readSettings).then((settings) => {
     settingsCache = settings
   })
   /**

@@ -4,6 +4,20 @@ nodeLinker: hoisted
 autoInstallPeers: true
 overrides:
   js-yaml@^4.1.0: 4.3.2
+  axios@^1: ^1.21.0
+  follow-redirects@^1: ^1.16.2
+  fflate@^0.8: ^0.8.3
+  fast-uri@^3: ^3.1.9
+  ip-address@^10: ^10.7.5
+  proxy-addr@^2: ^2.0.8
+  "@modelcontextprotocol/sdk@^1": ^1.32.2
+  "@modelcontextprotocol/client@^2": ^2.4.0
+  hono@^4: ^4.13.16
+  "@hono/node-server@^2": ^2.1.6
+  zod@^4: ^4.6.7
+  body-parser@^2: ^2.4.0
+  undici@^8: ^8.12.3
+  qs@^6: ^6.17.1
 onlyBuiltDependencies:
   - esbuild
   - protobufjs

@@ -4,18 +4,18 @@
 
 ## 安装
 
-适用环境：**DeepSeek Harness 0.1.5-rc.2 的 Web profile**、Node.js 22.19+。请先在 Harness 中配置可用模型。
+适用环境：**DeepSeek Harness 0.2.1-rc.5 的 Web profile**、Node.js 22.19+。请先在 Harness 中配置可用模型。
 
-1. 从 [GitHub Release 下载 dsh-im-qq-wechat-0.5.7.tgz](https://github.com/SoledadAki/dsh-im-qq-wechat/releases/download/v0.5.7/dsh-im-qq-wechat-0.5.7.tgz)。**保留 `.tgz` 原文件，不要解压，也不要下载仓库的 “Source code (zip)” 当作安装包。**
+1. 从 [GitHub Release 下载 dsh-im-qq-wechat-0.6.0.tgz](https://github.com/SoledadAki/dsh-im-qq-wechat/releases/download/v0.6.0/dsh-im-qq-wechat-0.6.0.tgz)。**保留 `.tgz` 原文件，不要解压，也不要下载仓库的 “Source code (zip)” 当作安装包。**
 2. 在运行 Harness 的同一个环境中打开终端，安装到你实际使用的 profile。默认 Web profile 为 `web`：
 
 ```sh
-dsh plugin --profile web add /path/to/dsh-im-qq-wechat-0.5.7.tgz
+dsh plugin --profile web add /path/to/dsh-im-qq-wechat-0.6.0.tgz
 dsh --profile web --dump-config
 dsh --profile web
 ```
 
-把 `/path/to/` 换成下载文件所在目录；Windows PowerShell 示例：`dsh plugin --profile web add "E:\Download\dsh-im-qq-wechat-0.5.7.tgz"`。如果 Harness 运行在 WSL 中，请在 WSL 终端安装，Windows 的 `E:\Download` 对应 `/mnt/e/Download`。`--dump-config` 输出中出现 `qq-weixin`，表示插件配置层已加入 profile。安装或升级后重启 Harness，并刷新浏览器页面。
+把 `/path/to/` 换成下载文件所在目录；Windows PowerShell 示例：`dsh plugin --profile web add "E:\Download\dsh-im-qq-wechat-0.6.0.tgz"`。如果 Harness 运行在 WSL 中，请在 WSL 终端安装，Windows 的 `E:\Download` 对应 `/mnt/e/Download`。`--dump-config` 输出中出现 `qq-weixin`，表示插件配置层已加入 profile。安装或升级后重启 Harness，并刷新浏览器页面。
 
 首次安装会联网拉取运行依赖，之后无需手动运行 `pnpm install` 或构建。解压后看见的 `package/` 是 npm 安装包的标准内部目录：`lib/`、`sidecar/` 和 `cordis.patch.yml` 是运行内容；`README.md`、`LICENSE` 和 `THIRD_PARTY_NOTICES.md` 是随包文档。
 
@@ -55,7 +55,7 @@ dsh --profile web
 
 ## 升级与卸载
 
-升级时安装新版 `.tgz` 并重启 Harness。绑定关系和会话存放在 Harness settings / credentials 中，0.5.7 沿用原有存储格式，覆盖安装即可。
+升级时安装新版 `.tgz` 并重启 Harness。0.6.0 需要 Harness 0.2：绑定关系和会话改存于 profile 中 `qq-weixin` 插件条目的实时配置字段，首次启动会自动导入旧 `settings.yaml` 中的数据，无需手动操作；细节与回滚方式见 [运维指南](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/docs/OPERATIONS.md)。仍在 Harness 0.1.x 上的用户请继续使用 0.5.7。
 
 ```sh
 dsh plugin --profile web remove dsh-im-qq-wechat
@@ -63,7 +63,7 @@ dsh plugin --profile web remove dsh-im-qq-wechat
 
 ## 排障
 
-- 设置页没有插件入口：确认安装的是本插件 `.tgz`，重启 Harness，并核对 Harness 版本为 0.1.5-rc.2。
+- 设置页没有插件入口：确认安装的是本插件 `.tgz`，重启 Harness，并核对 Harness 版本为 0.2.1-rc.5（0.1.x 请使用本插件 0.5.x）。
 - 已连接但不响应：检查绑定用户与群聊的 @ / 回复条件，先用绑定账号私聊测试。
 - 已连接但只回复“处理失败”：升级到 0.5.2，重启 Harness 后再测试。
 - QQ 显示“正在思考…”后无结果，或 Harness 意外退出：升级到 0.5.3；原生流式失败时会自动改用普通消息。
@@ -82,6 +82,6 @@ pnpm install --frozen-lockfile
 pnpm run release:check
 ```
 
-`release:check` 依次执行类型检查、测试、构建，并在独立目录中安装生成的包、启动真实 Harness 0.1.5-rc.2，验证浏览器模块、认证接口与 Agent 生命周期；安装包输出到 `dist/`。发布流程见 [CONTRIBUTING.md](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/CONTRIBUTING.md)，真实通道验收见 [运维指南](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/docs/OPERATIONS.md)。
+`release:check` 依次执行类型检查、测试、构建，并在独立目录中安装生成的包、启动真实 Harness 0.2.1-rc.5，验证旧版状态迁移与解绑吊销、浏览器模块、认证接口与 Agent 生命周期；安装包输出到 `dist/`。发布流程见 [CONTRIBUTING.md](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/CONTRIBUTING.md)，真实通道验收见 [运维指南](https://github.com/SoledadAki/dsh-im-qq-wechat/blob/main/docs/OPERATIONS.md)。
 
 MIT。第三方来源见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0
+
+### 兼容性（破坏性）
+
+- **适配 DeepSeek Harness 0.2.1-rc.5**，不再支持 0.1.x（0.1.x 请继续使用 0.5.7）。所有 `@deepseek-ai/*` peer dependencies 升级到 0.2.1-rc.5；`dsh-agent-presets` 跟随上游改名为 `dsh-agent-preset`；cordis 4.0.5、schemastery 3.18.5。
+- Harness 0.2 移除了 `ctx.settings.register()`，旧版插件在 0.2 上会直接激活失败（设置页与 `/api/qqbot/*` 均 404）。插件状态改为 Config 中的 `.volatile()` 字段，经 `settings.update/replace` 实时写回，无需重载插件。
+- 状态字段 `channels` 改名为 `channelState`（`channels` 是通道列表配置，0.2 中两者同处一个配置条目）。
+
+### 迁移
+
+- 首次在 0.2 上启动时自动导入旧 `settings.yaml` 的 `qq-weixin` 段（宿主会把该文件改名为 `settings.yaml.imported`，两者都会读取）。宿主自带的导入会因 `channels` 键冲突整段拒绝，若不处理，所有绑定与 owner 都会丢失。已有状态时不导入、不覆盖。
+- `解绑` 仍通过 `replace` 吊销 owner；真实 Host 验收新增"旧状态迁移 + 解绑吊销"检查。
+
+### 工程
+
+- `verify-package` 修复 Windows 上 GNU tar 把 `E:` 当作远程主机的问题。
+- 新增 `state-store` 单元测试。
+- 开发/CI 依赖通过 pnpm overrides 升级到已修复版本（axios、follow-redirects、undici、@modelcontextprotocol/sdk、proxy-addr、zod 等），`pnpm audit` 清零。
+
 ## 0.5.7
 
 ### 指令

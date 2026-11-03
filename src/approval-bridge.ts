@@ -1,4 +1,4 @@
-/** Agent-scoped approval and question waterfalls for Harness 0.1.5-rc.2. */
+/** Agent-scoped approval and question waterfalls for Harness 0.2. */
 
 import { UserQuestionError } from '@deepseek-ai/dsh-user-questions'
 import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions'
